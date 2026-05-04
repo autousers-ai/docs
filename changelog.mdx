@@ -1,0 +1,105 @@
+---
+title: "Changelog"
+description: "Every API-affecting change, dated, in plain English."
+---
+
+Subscribe to the [RSS feed](https://docs.autousers.ai/changelog/rss.xml)
+or watch this page for every change to the public surface — new routes,
+new webhooks, new error codes, deprecations, breaking-version splits.
+
+We log every change. Even the additive, non-breaking ones.
+
+---
+
+## 2026-05-04 — Public API beta launch
+
+- **OpenAPI 3.1 spec** at `https://app.autousers.ai/api/v1/openapi.json` — full coverage of `/api/v1/*` (143+ operations across 80+ paths).
+- **Mintlify docs** at `https://docs.autousers.ai` (DNS pending).
+- **Webhooks (beta, flag-gated)** — 7 v1 events, Stripe-style HMAC-SHA256 signing, exponential backoff over ~3 days, `POST /v1/webhooks/{id}/test` for synthetic events.
+- **Stripe-style cursor params** — `starting_after`/`ending_before` now canonical on every list endpoint; legacy `cursor` param emits `Deprecation: true` headers (sunset 2027-04-04).
+- **CORS opens for `docs.autousers.ai`** — playground "Try it" works against production.
+- **`Autousers-Signature`, `Idempotency-Key`, `Autousers-Version`, `X-RateLimit-*`, `X-Request-Id`, `Deprecation`/`Sunset`/`Link`** documented and exposed via `Access-Control-Expose-Headers`.
+
+Coming next: tier-aware rate limiting + monthly quotas (flag-gated, observation-only today), `Idempotency-Key` replay (flag-gated, passthrough today), and typed SDKs for TypeScript and Python (planned, generated from the same OpenAPI spec the live API reference is built from).
+
+---
+
+## 2026-05-04 — Public API beta launch (extended notes)
+
+The big one. Three things shipped together:
+
+### `/v1/*` is now the documented public surface
+
+- 100% of publishable routes are in the OpenAPI spec at
+  [`/api/v1/openapi.json`](https://app.autousers.ai/api/v1/openapi.json).
+- The in-page playground works against production with a real
+  `ak_live_*` key.
+- Concepts, errors, scopes, and pagination are documented at
+  [`docs.autousers.ai`](https://docs.autousers.ai).
+
+### Webhooks (beta, flag-gated)
+
+Seven event types ship behind the `AUTOUSERS_WEBHOOKS_ENABLED` flag:
+
+- `evaluation.created`
+- `evaluation.status_changed`
+- `evaluation.completed`
+- `autouser_run.completed`
+- `autouser_run.failed`
+- `rating.created`
+- `calibration.frozen`
+
+While the flag is off, every `/v1/webhooks/*` route returns
+`503 Service Unavailable`. The flip-the-switch announcement will land
+in the next entry. New scopes: `webhooks:read`, `webhooks:write`,
+`events:read`. Tier-gated to **Pro and Enterprise**.
+
+See [Webhooks → Overview](/webhooks/overview).
+
+### Mintlify docs at `docs.autousers.ai`
+
+Hand-curated content for authentication, error envelope, scope
+vocabulary, signature verification (TS/Python/Go/Ruby), retry
+schedule, and four production recipes. Auto-generated route reference
+from the live OpenAPI spec.
+
+The product help center at
+[`autousers.ai/help`](https://autousers.ai/help) stays where it is —
+this is the developer reference.
+
+---
+
+## What's still rolling out
+
+A handful of items are documented but enforcement is still rolling out
+during beta. Build to the contract today; nothing changes when the
+switch flips.
+
+- **Tier-aware rate limits and monthly quotas.** The
+  `X-RateLimit-Limit/Remaining/Reset` headers are populated; over-limit
+  requests log but do not yet block. See [Rate limits](/rate-limits).
+- **`Idempotency-Key` enforcement.** Keys are accepted and recorded;
+  full replay-on-conflict semantics ship next.
+- **TypeScript and Python SDKs.** Planned. The OpenAPI spec is the
+  source of truth; SDK generation will be wired off it once the
+  Wave 1 hardening (rate-limit + idempotency enforcement) lands.
+- **`Autousers-Version` request header.** Date-pinned versioning is
+  designed but not yet live; default to current behaviour.
+- **Audit log API and status page.** Both queued for Wave 3 of the
+  public-API rollout.
+
+---
+
+## Format conventions
+
+Every entry uses one of four labels in its heading:
+
+| Label          | Meaning                                                                        |
+| -------------- | ------------------------------------------------------------------------------ |
+| **Added**      | New endpoint, new field, new event, new scope. Non-breaking.                   |
+| **Changed**    | Behaviour adjusted within the existing contract.                               |
+| **Deprecated** | Marked with `Deprecation: true` + `Sunset` header. ≥12 month migration window. |
+| **Removed**    | Sunset window has elapsed. Route now 410s.                                     |
+
+Breaking changes never ship inside `/v1`. See
+[Versioning](/versioning) for the full policy.

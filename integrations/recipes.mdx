@@ -1,0 +1,240 @@
+---
+title: "Recipes"
+description: "Slack notifications, GitHub Actions gates, Linear tickets, Looker sync."
+---
+
+Four worked examples that customers actually run in production.
+
+## 1. Slack notification on `evaluation.completed`
+
+A Vercel function receiver that posts to Slack when an eval finishes.
+
+```ts
+// app/api/webhooks/autousers/route.ts
+import crypto from "node:crypto";
+
+export const runtime = "nodejs";
+
+const SECRET = process.env.AUTOUSERS_WEBHOOK_SECRET!;
+const SLACK = process.env.SLACK_WEBHOOK_URL!;
+
+function verify(rawBody: string, header: string | null) {
+  if (!header) return false;
+  const parts = Object.fromEntries(
+    header.split(",").map((p) => p.split("=") as [string, string])
+  );
+  const t = Number(parts.t);
+  if (!t || Math.abs(Date.now() / 1000 - t) > 300) return false;
+  const expected = crypto
+    .createHmac("sha256", SECRET)
+    .update(`${t}.${rawBody}`)
+    .digest("hex");
+  const a = Buffer.from(parts.v1, "hex");
+  const b = Buffer.from(expected, "hex");
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+export async function POST(req: Request) {
+  const raw = await req.text();
+  if (!verify(raw, req.headers.get("autousers-signature"))) {
+    return new Response("invalid signature", { status: 400 });
+  }
+  const event = JSON.parse(raw);
+  if (event.type !== "evaluation.completed") {
+    return new Response(null, { status: 204 });
+  }
+  const e = event.data.object;
+  const alpha = e.summary?.krippendorffAlpha?.toFixed(2) ?? "n/a";
+  const text = [
+    `:white_check_mark: *${e.name}* finished`,
+    `Krippendorff α: *${alpha}* (${e.summary.ratingCount} ratings)`,
+    `<https://app.autousers.ai/evaluations/${e.id}/results|Open results>`,
+  ].join("\n");
+
+  await fetch(SLACK, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+
+  return new Response(null, { status: 200 });
+}
+```
+
+Register the endpoint once:
+
+```bash
+curl -X POST https://app.autousers.ai/api/v1/webhooks \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://your.app/api/webhooks/autousers",
+    "enabled_events": ["evaluation.completed"]
+  }'
+```
+
+## 2. GitHub Actions gate on Krippendorff α
+
+Block the merge when the agreement on the staging deploy drops below a
+threshold.
+
+```yaml
+# .github/workflows/eval-gate.yml
+name: UX gate
+on:
+  pull_request:
+    paths: ["app/**"]
+jobs:
+  ux-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with: { node-version: 22 }
+      - run: npm i -g @autousers/cli
+
+      - name: Smoke eval against preview deploy
+        env:
+          AUTOUSERS_API_KEY: ${{ secrets.AUTOUSERS_API_KEY }}
+          PREVIEW_URL: ${{ steps.preview.outputs.preview_url }}
+        run: |
+          set -euo pipefail
+
+          EVAL_ID=$(autousers eval create \
+            --template accessibility \
+            --url "$PREVIEW_URL" \
+            --autousers first-time-buyer:3,accessibility-first:2 \
+            --json | jq -r .id)
+
+          autousers eval run "$EVAL_ID"
+          autousers eval wait "$EVAL_ID" --timeout 900
+
+          ALPHA=$(autousers eval agreement "$EVAL_ID" --json | jq -r .krippendorff.alpha)
+          echo "alpha=$ALPHA"
+
+          THRESHOLD=0.6
+          if [ "$(echo "$ALPHA < $THRESHOLD" | bc)" -eq 1 ]; then
+            echo "::error ::UX α=$ALPHA below threshold $THRESHOLD"
+            echo "Open https://app.autousers.ai/evaluations/$EVAL_ID/results"
+            exit 1
+          fi
+```
+
+The CLI's `eval wait` blocks on the underlying `evaluation.completed`
+webhook (or polls if no webhook receiver is configured for the team).
+You don't need to register a webhook to use this recipe — but it
+finishes faster if you do.
+
+## 3. Linear ticket on `autouser_run.failed`
+
+Auto-create a Linear ticket when a run errors. Useful for catching
+flaky stimuli, expired auth on staging, or outright worker bugs.
+
+```ts
+// app/api/webhooks/autousers/route.ts (continued from recipe 1)
+if (event.type === "autouser_run.failed") {
+  const r = event.data.object;
+  await fetch("https://api.linear.app/graphql", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: process.env.LINEAR_API_KEY!,
+    },
+    body: JSON.stringify({
+      query: `
+        mutation IssueCreate($input: IssueCreateInput!) {
+          issueCreate(input: $input) { success issue { id identifier url } }
+        }
+      `,
+      variables: {
+        input: {
+          teamId: process.env.LINEAR_TEAM_ID!,
+          title: `Autouser run failed: ${r.id}`,
+          description: [
+            `**Evaluation:** ${r.evaluationId}`,
+            `**Persona:** ${r.autouserId}`,
+            `**Error:** ${r.error}`,
+            `**Cost burned:** $${r.estimatedCostUsd}`,
+            ``,
+            `https://app.autousers.ai/evaluations/${r.evaluationId}/autouser-runs/${r.id}`,
+          ].join("\n"),
+          priority: 2,
+          labelIds: [process.env.LINEAR_FAILURE_LABEL_ID!],
+        },
+      },
+    }),
+  });
+}
+```
+
+Subscribe with `enabled_events: ["autouser_run.failed"]` (or `["*"]`
+if you have a single fan-out receiver).
+
+## 4. Looker / BigQuery sync on `rating.created`
+
+Stream every rating into a warehouse table for trend analysis. The
+schema mirrors the [Rating shape](/concepts/ratings-and-agreement).
+
+```ts
+// app/api/webhooks/autousers/route.ts (continued)
+import { BigQuery } from "@google-cloud/bigquery";
+const bq = new BigQuery();
+
+if (event.type === "rating.created") {
+  const r = event.data.object;
+  await bq
+    .dataset(process.env.BQ_DATASET!)
+    .table("autousers_ratings")
+    .insert(
+      [
+        {
+          insert_id: event.id, // BigQuery dedup on this
+          rating_id: r.id,
+          evaluation_id: r.evaluationId,
+          comparison_id: r.comparisonId,
+          rater_type: r.raterType,
+          autouser_id: r.autouserId,
+          autouser_run_id: r.autouserRunId,
+          user_id: r.userId,
+          public_rater_id: r.publicRaterId,
+          rubric_version: r.rubricVersion,
+          dimension_ratings: JSON.stringify(r.dimensionRatings),
+          factors: r.factors ? JSON.stringify(r.factors) : null,
+          justification: r.justification,
+          time_spent_seconds: r.timeSpentSeconds,
+          created_at: r.createdAt,
+        },
+      ],
+      { ignoreUnknownValues: false }
+    );
+}
+```
+
+Schema:
+
+```sql
+CREATE TABLE `your_project.autousers.autousers_ratings` (
+  rating_id STRING,
+  evaluation_id STRING,
+  comparison_id STRING,
+  rater_type STRING,
+  autouser_id STRING,
+  autouser_run_id STRING,
+  user_id STRING,
+  public_rater_id STRING,
+  rubric_version STRING,
+  dimension_ratings JSON,
+  factors JSON,
+  justification STRING,
+  time_spent_seconds INT64,
+  created_at TIMESTAMP
+)
+PARTITION BY DATE(created_at)
+CLUSTER BY evaluation_id;
+```
+
+Use BigQuery's `insertId` deduplication or a manual MERGE keyed on
+`rating_id` to handle webhook retries.
+
+For Looker, point a view at the partitioned table; α and dimension
+distributions update in near-real time as deliveries land.

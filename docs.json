@@ -1,0 +1,106 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "Autousers",
+  "description": "REST API, webhooks, and SDK reference for autousers.ai — AI-driven UX evaluation.",
+  "logo": {
+    "light": "/logo-light.svg",
+    "dark": "/logo-dark.svg",
+    "href": "https://docs.autousers.ai"
+  },
+  "favicon": "/favicon.svg",
+  "colors": {
+    "primary": "#0053D6",
+    "light": "#7FC8FF",
+    "dark": "#0053D6"
+  },
+  "navbar": {
+    "links": [
+      { "label": "Help center", "href": "https://autousers.ai/help" },
+      { "label": "Status", "href": "https://status.autousers.ai" }
+    ],
+    "primary": {
+      "type": "button",
+      "label": "Sign in",
+      "href": "https://app.autousers.ai/login"
+    }
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "authentication",
+              "errors",
+              "pagination",
+              "rate-limits",
+              "idempotency",
+              "versioning"
+            ]
+          },
+          {
+            "group": "Concepts",
+            "pages": [
+              "concepts/overview",
+              "concepts/evaluations",
+              "concepts/autousers",
+              "concepts/calibration",
+              "concepts/templates",
+              "concepts/ratings-and-agreement",
+              "concepts/files",
+              "concepts/teams-and-permissions",
+              "concepts/ai-insights"
+            ]
+          },
+          {
+            "group": "Webhooks",
+            "pages": [
+              "webhooks/overview",
+              "webhooks/events",
+              "webhooks/signature-verification",
+              "webhooks/retry-and-replay",
+              "webhooks/testing",
+              "webhooks/migrating-from-polling"
+            ]
+          },
+          {
+            "group": "Integrations",
+            "pages": [
+              "integrations/overview",
+              "integrations/mcp-server",
+              "integrations/cli",
+              "integrations/figma-plugin",
+              "integrations/chrome-extension",
+              "integrations/recipes"
+            ]
+          },
+          {
+            "group": "Changelog",
+            "pages": ["changelog"]
+          }
+        ]
+      },
+      {
+        "tab": "API reference",
+        "openapi": "https://app.autousers.ai/api/v1/openapi.json"
+      }
+    ]
+  },
+  "api": {
+    "playground": {
+      "display": "interactive"
+    }
+  },
+  "footer": {
+    "socials": {
+      "x": "https://x.com/autousers",
+      "github": "https://github.com/autousers-ai",
+      "linkedin": "https://www.linkedin.com/company/autousers"
+    }
+  }
+}

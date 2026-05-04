@@ -1,0 +1,67 @@
+---
+title: "Integrations"
+description: "Six first-party clients, all built on the same /v1 surface."
+---
+
+The same REST API powers every Autousers surface. Pick the integration
+closest to where the work happens.
+
+<CardGroup cols={2}>
+  <Card title="MCP server" icon="robot" href="/integrations/mcp-server">
+    Mount Autousers tools into Claude Desktop, Claude.ai, Cursor, or any
+    MCP-aware agent.
+  </Card>
+  <Card title="CLI" icon="terminal" href="/integrations/cli">
+    `autousers eval create --template=accessibility` in CI, in a Makefile, in a
+    Slack bot.
+  </Card>
+  <Card title="Figma plugin" icon="figma" href="/integrations/figma-plugin">
+    Queue an autouser pass on a frame without leaving Figma.
+  </Card>
+  <Card
+    title="Chrome extension"
+    icon="chrome"
+    href="/integrations/chrome-extension"
+  >
+    Live-rate any URL in your tab. Useful for quick smoke tests.
+  </Card>
+  <Card title="REST API + cURL" icon="code" href="/api-reference">
+    Direct HTTP. Available today, no client needed.
+  </Card>
+</CardGroup>
+
+<Note>
+  **Typed SDKs are on the roadmap.** A TypeScript SDK (`@autousers/sdk`) and a
+  Python equivalent are planned — generated from the same [OpenAPI
+  spec](https://app.autousers.ai/api/v1/openapi.json) the REST API reference is
+  built from. Until they ship, the cleanest paths are the CLI (for CI / scripts)
+  or hand-rolled `fetch` against the documented routes (for application code).
+</Note>
+
+## What lives where
+
+| Surface          | Auth             | Best for                                        | Distribution              |
+| ---------------- | ---------------- | ----------------------------------------------- | ------------------------- |
+| MCP server       | API key or OAuth | Agentic workflows, conversational eval creation | npm + Smithery + uvx      |
+| CLI              | API key          | CI/CD, batch scripts, quick local commands      | npm `@autousers/cli`      |
+| Figma plugin     | Plugin JWT       | Designer-led evaluations, quick frame review    | Figma Community           |
+| Chrome extension | API key + cookie | Live-rate any URL, smoke tests, demos           | Chrome Web Store          |
+| REST API         | API key or OAuth | Anything else — direct HTTP, any language       | `app.autousers.ai/api/v1` |
+
+## Why so many surfaces
+
+UX research lives in a lot of places. The product team uses Figma. The
+research team uses notebooks. The platform team wants `npx`. The
+agentic crowd wants MCP. We meet each of them where they work; one
+`/v1` underneath.
+
+## See also
+
+<CardGroup cols={2}>
+  <Card title="Recipes" icon="book" href="/integrations/recipes">
+    Slack notifications, GitHub Actions gates, Linear tickets, Looker sync.
+  </Card>
+  <Card title="API reference" icon="code" href="/api-reference">
+    Every route, every field, with try-it-now.
+  </Card>
+</CardGroup>

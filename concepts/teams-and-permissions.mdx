@@ -1,0 +1,113 @@
+---
+title: "Teams & permissions"
+description: "The ownership boundary. One resource, one team, four roles."
+---
+
+Every resource in Autousers — Evaluation, Autouser, Template, ApiKey,
+WebhookEndpoint — lives on exactly one **Team**. Permissions cascade
+from team membership; sharing breaks open select per-evaluation
+exceptions.
+
+## Roles
+
+| Role   | Read | Edit own | Edit team | Manage members | Billing |
+| ------ | :--: | :------: | :-------: | :------------: | :-----: |
+| Viewer |  ✓   |          |           |                |         |
+| Editor |  ✓   |    ✓     |     ✓     |                |         |
+| Admin  |  ✓   |    ✓     |     ✓     |       ✓        |         |
+| Owner  |  ✓   |    ✓     |     ✓     |       ✓        |    ✓    |
+
+Every team has exactly **one Owner**. Use
+`POST /v1/teams/{id}/transfer-admin` to hand off.
+
+## Auth and team binding
+
+| Principal    | Team binding                                                    |
+| ------------ | --------------------------------------------------------------- |
+| Session      | All teams the user belongs to.                                  |
+| `ak_live_*`  | Pinned to the team it was minted on. Cannot act on other teams. |
+| OAuth 2.1    | The team the user consented under at `/authorize` time.         |
+| Figma plugin | All teams the user belongs to.                                  |
+
+API key callers cannot pivot to a different team mid-request. To act on
+a different team, mint a new key on that team.
+
+## Reading your teams
+
+```bash
+curl https://app.autousers.ai/api/v1/teams \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY"
+```
+
+## Members
+
+```bash
+curl https://app.autousers.ai/api/v1/teams/$TEAM_ID/members \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY"
+```
+
+```bash
+# Invite a new member
+curl -X POST https://app.autousers.ai/api/v1/teams/$TEAM_ID/members \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "email": "alice@example.com", "role": "Editor" }'
+```
+
+Role changes emit no webhook today; subscribe to the audit log API
+(coming Wave 3) for that signal.
+
+## Per-evaluation sharing
+
+Beyond team membership, you can share a single evaluation with people
+who are **not** on the team. Three primitives:
+
+| Primitive                     | When to use it                                                      |
+| ----------------------------- | ------------------------------------------------------------------- |
+| **Public share token**        | Mass distribution. One URL, anyone with it can rate.                |
+| **`EvaluationShare`**         | Named individuals — a specific email gets a specific permission.    |
+| **`EvaluationInvite`**        | Pre-account invitation — sends an email, becomes a Share on accept. |
+| **`EvaluationAccessRequest`** | Someone with the link who lacks access asks for it.                 |
+
+Edit-on-share is gated by `editorsCanShare` on the evaluation row —
+default `true`. When the Owner flips it off, only Admin+ can edit
+sharing.
+
+```bash
+# List shares
+curl https://app.autousers.ai/api/v1/evaluations/$EVAL_ID/shares \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY"
+
+# Add a share
+curl -X POST https://app.autousers.ai/api/v1/evaluations/$EVAL_ID/shares \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "email": "external@example.com", "permission": "Viewer" }'
+```
+
+## "Not found" vs "no access"
+
+We deliberately conflate the two. A 404 from `/v1/evaluations/{id}`
+means either "no such row" or "you lack permission". This avoids
+leaking the existence of resources to outsiders.
+
+The single exception: cross-team requests where the caller has a
+membership on **a** team but not the resource's team return a 403 with
+`code: evaluation_no_access` and a `details` object containing the
+resource's team name and the caller's email. The dashboard uses this
+to render a "switch account" empty state.
+
+## Deletion
+
+Deleting a team cascades to every resource on it — evaluations,
+autousers, templates, API keys, webhook endpoints. **Irreversible.**
+Owner-only.
+
+```bash
+curl -X DELETE https://app.autousers.ai/api/v1/teams/$TEAM_ID \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY"
+```
+
+The Owner gets a final-warning email 24 hours before any team-deletion
+endpoint is wired up to the dashboard. (As of this writing, team
+deletion is dashboard-only — no API route.)

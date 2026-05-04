@@ -1,0 +1,316 @@
+---
+title: "Event reference"
+description: "Every v1 event, when it fires, what it carries."
+---
+
+Seven events ship in v1. Each fires exactly once per state transition;
+none fan out per-rater.
+
+| Event                       | Fires when                                                     | Object                 |
+| --------------------------- | -------------------------------------------------------------- | ---------------------- |
+| `evaluation.created`        | `POST /v1/evaluations` succeeds (status `Draft` or `Running`). | `Evaluation`           |
+| `evaluation.status_changed` | `Evaluation.status` transitions.                               | `Evaluation`           |
+| `evaluation.completed`      | All `AutouserRun`s + ratings finalize.                         | `Evaluation` + summary |
+| `autouser_run.completed`    | `AutouserRun.status` flips to `completed`.                     | `AutouserRun`          |
+| `autouser_run.failed`       | `AutouserRun.status` flips to `failed`.                        | `AutouserRun` + error  |
+| `rating.created`            | A new `Rating` row inserts (human OR autouser).                | `Rating`               |
+| `calibration.frozen`        | An autouser's rubric is frozen.                                | `Autouser` + rubric    |
+
+Subscribe to specific types in `enabled_events` on the endpoint. Use
+`["*"]` to receive everything — recommended only for warehouse-sync
+integrations.
+
+## Envelope
+
+All events share the same outer shape:
+
+```json
+{
+  "id": "event_clxq3...",
+  "type": "evaluation.completed",
+  "api_version": "2026-05-04",
+  "created": 1714867200,
+  "team_id": "team_clxq3...",
+  "data": {
+    "object": {
+      /* the resource */
+    }
+  },
+  "request": { "id": "req_01HXY...", "idempotency_key": null }
+}
+```
+
+`request.id` traces back to the API request that triggered the event,
+useful for correlating customer-side and server-side logs.
+
+## Per-event payloads
+
+<AccordionGroup>
+
+<Accordion title="evaluation.created">
+
+Fires after `POST /v1/evaluations` returns 201. Payload mirrors the
+HTTP response.
+
+```json
+{
+  "id": "event_clxq3created",
+  "type": "evaluation.created",
+  "api_version": "2026-05-04",
+  "created": 1714867200,
+  "team_id": "team_clxq3...",
+  "data": {
+    "object": {
+      "id": "eval_clxq3...",
+      "teamId": "team_clxq3...",
+      "name": "Checkout v2 vs v1",
+      "type": "SxS",
+      "status": "Draft",
+      "shareToken": "shr_clxq3...",
+      "shareAccess": "TEAM_ONLY",
+      "allowMultipleRatings": false,
+      "createdAt": "2026-05-04T10:00:00.000Z",
+      "updatedAt": "2026-05-04T10:00:00.000Z",
+      "links": {
+        "preview": "https://app.autousers.ai/evaluations/eval_clxq3.../preview",
+        "review": "https://app.autousers.ai/evaluations/eval_clxq3.../review",
+        "results": "https://app.autousers.ai/evaluations/eval_clxq3.../results"
+      }
+    }
+  },
+  "request": { "id": "req_01HXY...", "idempotency_key": null }
+}
+```
+
+</Accordion>
+
+<Accordion title="evaluation.status_changed">
+
+Fires on every `Evaluation.status` transition. Reading the current
+status alone is insufficient — listen for this event if you need to
+react on `Draft → Running` distinct from `Running → Ended`.
+
+```json
+{
+  "id": "event_clxq3statc",
+  "type": "evaluation.status_changed",
+  "api_version": "2026-05-04",
+  "created": 1714867260,
+  "team_id": "team_clxq3...",
+  "data": {
+    "object": {
+      "id": "eval_clxq3...",
+      "status": "Running",
+      "previous_status": "Draft",
+      "...": "...full Evaluation..."
+    }
+  },
+  "request": { "id": "req_01HXY...", "idempotency_key": null }
+}
+```
+
+</Accordion>
+
+<Accordion title="evaluation.completed">
+
+Fires once when **all** queued `AutouserRun`s reach a terminal state
+(`completed` or `failed`) AND any pending human rating windows close.
+The single most useful event for "wake up when the eval is done"
+integrations.
+
+```json
+{
+  "id": "event_clxq3compl",
+  "type": "evaluation.completed",
+  "api_version": "2026-05-04",
+  "created": 1714867800,
+  "team_id": "team_clxq3...",
+  "data": {
+    "object": {
+      "id": "eval_clxq3...",
+      "name": "Checkout v2 vs v1",
+      "status": "Ended",
+      "summary": {
+        "ratingCount": 24,
+        "autouserRatingCount": 18,
+        "humanRatingCount": 6,
+        "krippendorffAlpha": 0.74,
+        "completedRunCount": 6,
+        "failedRunCount": 0
+      },
+      "...": "...full Evaluation..."
+    }
+  },
+  "request": { "id": "req_01HXY...", "idempotency_key": null }
+}
+```
+
+</Accordion>
+
+<Accordion title="autouser_run.completed">
+
+Fires per `AutouserRun` when it reaches `status: completed`. If you
+queued 6 runs (`agentCount: 3 × 2 comparisons`), expect six events.
+
+```json
+{
+  "id": "event_clxq3runOK",
+  "type": "autouser_run.completed",
+  "api_version": "2026-05-04",
+  "created": 1714867440,
+  "team_id": "team_clxq3...",
+  "data": {
+    "object": {
+      "id": "arun_clxq3...",
+      "evaluationId": "eval_clxq3...",
+      "autouserId": "auto_first_time_buyer",
+      "autouserType": "builtin",
+      "status": "completed",
+      "ratingsCreated": 4,
+      "inputTokens": 18204,
+      "outputTokens": 4123,
+      "estimatedCostUsd": 0.0623,
+      "credentialSource": "platform",
+      "artifactsPath": "gs://autousers-assets/runs/arun_clxq3.../",
+      "startedAt": "2026-05-04T10:01:12.000Z",
+      "completedAt": "2026-05-04T10:04:00.000Z",
+      "createdAt": "2026-05-04T10:01:00.000Z"
+    }
+  },
+  "request": { "id": "req_01HXY...", "idempotency_key": null }
+}
+```
+
+</Accordion>
+
+<Accordion title="autouser_run.failed">
+
+Fires when an `AutouserRun` errors out. A failed run does NOT consume
+autouser-rating quota, but you may want to alert on it (the design
+might be unreachable, or the worker might have crashed).
+
+```json
+{
+  "id": "event_clxq3runFAIL",
+  "type": "autouser_run.failed",
+  "api_version": "2026-05-04",
+  "created": 1714867500,
+  "team_id": "team_clxq3...",
+  "data": {
+    "object": {
+      "id": "arun_clxq3...",
+      "evaluationId": "eval_clxq3...",
+      "autouserId": "auto_first_time_buyer",
+      "status": "failed",
+      "error": "Stimulus URL returned 503 after 3 retries.",
+      "ratingsCreated": 0,
+      "inputTokens": 4102,
+      "outputTokens": 0,
+      "estimatedCostUsd": 0.002,
+      "startedAt": "2026-05-04T10:01:12.000Z",
+      "completedAt": "2026-05-04T10:02:30.000Z"
+    }
+  },
+  "request": { "id": "req_01HXY...", "idempotency_key": null }
+}
+```
+
+</Accordion>
+
+<Accordion title="rating.created">
+
+Fires per Rating row insert — humans AND autousers. The single
+firehose event for warehouse-sync use cases. High volume on busy
+evals; budget your receiver accordingly.
+
+```json
+{
+  "id": "event_clxq3rating",
+  "type": "rating.created",
+  "api_version": "2026-05-04",
+  "created": 1714867268,
+  "team_id": "team_clxq3...",
+  "data": {
+    "object": {
+      "id": "rat_clxq3...",
+      "evaluationId": "eval_clxq3...",
+      "comparisonId": "cmp_clxq3...",
+      "raterType": "autouser",
+      "userId": null,
+      "publicRaterId": null,
+      "autouserId": "auto_first_time_buyer",
+      "autouserRunId": "arun_clxq3...",
+      "rubricVersion": "v3",
+      "dimensionRatings": { "overall": 4, "trust": 3, "clarity": 5 },
+      "openTextResponses": { "overall": "Felt fast but trust signals thin." },
+      "factors": null,
+      "justification": "Liked simplicity, missed social proof.",
+      "skipReason": null,
+      "timeSpentSeconds": 42,
+      "createdAt": "2026-05-04T10:21:08.000Z"
+    }
+  },
+  "request": { "id": "req_01HXY...", "idempotency_key": null }
+}
+```
+
+</Accordion>
+
+<Accordion title="calibration.frozen">
+
+Fires when an autouser's rubric is locked via
+`POST /v1/autousers/{id}/calibration/freeze`. Downstream pipelines
+should listen for this before promoting an autouser to production.
+
+```json
+{
+  "id": "event_clxq3frozen",
+  "type": "calibration.frozen",
+  "api_version": "2026-05-04",
+  "created": 1714868000,
+  "team_id": "team_clxq3...",
+  "data": {
+    "object": {
+      "autouser": {
+        "id": "auto_clxq3...",
+        "name": "Healthcare-portal patient",
+        "calibrationStatus": "frozen",
+        "activeRubricId": "rub_clxq3..."
+      },
+      "rubric": {
+        "id": "rub_clxq3...",
+        "version": 3,
+        "krippendorffAlpha": 0.81,
+        "frozenAt": "2026-05-04T10:30:00.000Z"
+      }
+    }
+  },
+  "request": { "id": "req_01HXY...", "idempotency_key": null }
+}
+```
+
+</Accordion>
+
+</AccordionGroup>
+
+## Adding new events
+
+New event types are additive — new entries on `Autousers-Event-Type`,
+new payload shapes — and ship without a version bump. Build your
+receiver to **ignore unknown event types**:
+
+```ts
+const KNOWN_TYPES = new Set([
+  "evaluation.created",
+  "evaluation.status_changed",
+  "evaluation.completed",
+  "autouser_run.completed",
+  "autouser_run.failed",
+  "rating.created",
+  "calibration.frozen",
+]);
+
+if (!KNOWN_TYPES.has(req.headers["autousers-event-type"])) {
+  return res.status(204).end(); // ack and drop
+}
+```

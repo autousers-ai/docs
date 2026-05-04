@@ -1,0 +1,131 @@
+---
+title: "Files & stimuli"
+description: "Three-step signed-URL upload. Direct-to-GCS, never through our origin."
+---
+
+When your stimulus is a URL, just pass it on the evaluation create
+body. When it's a screenshot, video, or PDF, use the file upload flow.
+
+The upload is a **three-step signed-URL handshake** — you talk to our
+API to get a signed URL, you `PUT` the bytes directly to Google Cloud
+Storage, then you tell us you're done. No bytes ever traverse our
+origin.
+
+## Why three steps
+
+- **Cost:** signed URLs are free; piping 200MB videos through Vercel
+  functions is not.
+- **Speed:** GCS regional edge upload beats round-tripping through us.
+- **Security:** we never see the file bytes; you never see our service
+  account.
+
+## Flow
+
+```
+1. POST /v1/files/init       →  { fileId, signedUrl, headers, expiresAt }
+2. PUT  <signedUrl>          →  204 (direct to GCS)
+3. POST /v1/files/{id}/finalize →  { fileId, sha256, sizeBytes, ready: true }
+```
+
+Then reference the `fileId` on `designUrls[].fileId` or
+`comparisonPairs[].sideAFileId` when creating an evaluation.
+
+## Step 1 — initialise
+
+```bash
+curl -X POST https://app.autousers.ai/api/v1/files/init \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "filename": "checkout-v2.png",
+    "mimeType": "image/png",
+    "sizeBytes": 482103
+  }'
+```
+
+Response:
+
+```json
+{
+  "fileId": "file_clxq3...",
+  "signedUrl": "https://storage.googleapis.com/autousers-assets/...?X-Goog-Signature=...",
+  "headers": {
+    "Content-Type": "image/png",
+    "x-goog-content-length-range": "0,524288000"
+  },
+  "expiresAt": "2026-05-04T10:21:08.000Z"
+}
+```
+
+Signed URLs expire in **15 minutes**.
+
+## Step 2 — PUT the bytes
+
+Use the headers from step 1 verbatim. Adding extra headers will void
+the signature.
+
+```bash
+curl -X PUT "$SIGNED_URL" \
+  -H "Content-Type: image/png" \
+  -H "x-goog-content-length-range: 0,524288000" \
+  --data-binary "@checkout-v2.png"
+```
+
+A successful PUT returns `204 No Content`.
+
+## Step 3 — finalise
+
+```bash
+curl -X POST https://app.autousers.ai/api/v1/files/$FILE_ID/finalize \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY"
+```
+
+```json
+{
+  "fileId": "file_clxq3...",
+  "sha256": "9a3f8e...",
+  "sizeBytes": 482103,
+  "mimeType": "image/png",
+  "ready": true
+}
+```
+
+Finalise validates that the bytes actually landed and computes a sha256
+checksum. **Do not skip it** — an unfinalised file is invisible to
+evaluation create.
+
+## Reading a file
+
+```bash
+curl https://app.autousers.ai/api/v1/files/$FILE_ID \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY"
+```
+
+The route gates on team membership and returns a short-lived signed GET
+URL. Render images directly from that URL; do not proxy them through
+your application.
+
+## Limits
+
+| Type              | Max size | Notes                                   |
+| ----------------- | -------- | --------------------------------------- |
+| `image/png`       | 25 MB    | Recommended for static design captures. |
+| `image/jpeg`      | 25 MB    |                                         |
+| `application/pdf` | 100 MB   | One PDF, multiple pages OK.             |
+| `video/mp4`       | 500 MB   | H.264 / H.265.                          |
+
+Files are retained for the life of the evaluation. Deleting an
+evaluation deletes its files.
+
+## Doctor
+
+A self-test endpoint to diagnose upload issues:
+
+```bash
+curl https://app.autousers.ai/api/v1/files/doctor \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY"
+```
+
+Returns a list of recent failed uploads on your team and the likely
+cause (signed URL expired, Content-Type mismatch, finalise never
+called).

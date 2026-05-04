@@ -1,0 +1,135 @@
+---
+title: "Evaluations"
+description: "The study container. SSE for a single design, SxS for a comparison. Lifecycle: Draft → Running → Ended."
+---
+
+An **evaluation** is the unit of UX research. It owns one or more
+**comparisons** (the things being rated), a **template** (the dimensions
+to rate against), the **autousers** queued to rate them, and the
+**ratings** those autousers and your humans produce.
+
+## Types
+
+| `type` | Stimuli                                                              | When to use it           |
+| ------ | -------------------------------------------------------------------- | ------------------------ |
+| `SSE`  | Single Stimulus Evaluation — N independent designs (`designUrls[]`). | "Rate the new checkout." |
+| `SxS`  | Side-by-Side Comparison — N pairs (`comparisonPairs[]`).             | "Is v2 better than v1?"  |
+
+The shape determines what the rater sees: SSE renders a single panel
+per comparison, SxS renders A and B together.
+
+## Lifecycle
+
+```
+Draft  ──────►  Running  ──────►  Ended
+  │                │
+  │                └─ autousers queued, ratings flowing
+  │
+  └─ wizard state, no work yet
+```
+
+Status transitions emit a `evaluation.status_changed` webhook (see
+[events](/webhooks/events)).
+
+| Status    | Meaning                                                          |
+| --------- | ---------------------------------------------------------------- |
+| `Draft`   | Wizard state. Editable. No autousers queued, no ratings allowed. |
+| `Running` | Autousers may be queued. Public share link is live.              |
+| `Ended`   | Closed for new ratings. Results are read-only.                   |
+
+## Creating an evaluation
+
+The minimum viable SSE evaluation:
+
+```bash
+curl -X POST https://app.autousers.ai/api/v1/evaluations \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $(uuidgen)" \
+  -d '{
+    "name": "Checkout v2",
+    "type": "SSE",
+    "status": "Draft",
+    "designUrls": [
+      { "url": "https://staging.example.com/checkout", "label": "v2", "stimulusType": "URL" }
+    ],
+    "selectedAutousers": [
+      { "autouserId": "auto_first_time_buyer", "agentCount": 3 }
+    ],
+    "selectedDimensionIds": ["overall", "trust", "clarity"],
+    "evaluationMethod": "ai"
+  }'
+```
+
+Always pass `dryRun: true` first to validate and price the run without
+committing. See [Quickstart](/quickstart#4-dry-run-a-new-evaluation).
+
+The response includes a `links` object with absolute URLs to the
+preview, review, edit, results, and public share pages — surface these
+in your UI rather than constructing URLs yourself.
+
+## Running the autousers
+
+Creating an evaluation does **not** queue autousers — that's a separate
+call so you can stage a draft without spend.
+
+```bash
+curl -X POST https://app.autousers.ai/api/v1/evaluations/$EVAL_ID/run-autousers \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY"
+```
+
+The endpoint flips the evaluation to `Running` (if it was `Draft`),
+expands `selectedAutousers` by `agentCount` into individual
+`AutouserRun` rows, and enqueues them on the GKE worker. Each run takes
+1–6 minutes depending on the design complexity.
+
+Subscribe to the `autouser_run.completed` webhook for completion. Or
+poll `GET /v1/evaluations/{id}/autouser-status` for an aggregate
+snapshot. Or open `GET /v1/evaluations/{id}/autouser-stream` for an SSE
+event stream.
+
+## Reading results
+
+```bash
+# Aggregated dimension scores + rater counts
+curl https://app.autousers.ai/api/v1/evaluations/$EVAL_ID/results \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY"
+
+# Per-rating raw data
+curl https://app.autousers.ai/api/v1/evaluations/$EVAL_ID/ratings \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY"
+```
+
+Use `/results` for dashboards (it's already aggregated). Use `/ratings`
+for warehouse sync (full row-level data, paginate).
+
+## Sharing
+
+Every evaluation has a public share token. Sharing modes:
+
+| `shareAccess`        | Behaviour                                      |
+| -------------------- | ---------------------------------------------- |
+| `TEAM_ONLY`          | Default. Only team members can view.           |
+| `LINK_ONLY`          | Anyone with the share URL can rate.            |
+| `PASSWORD_PROTECTED` | Requires `sharePassword` (≥4 chars).           |
+| `EMAIL_GATED`        | Public raters supply name/email before rating. |
+
+See [Teams & permissions](/concepts/teams-and-permissions) for the share
+ACL.
+
+## Deletion
+
+```bash
+curl -X DELETE https://app.autousers.ai/api/v1/evaluations/$EVAL_ID \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY"
+```
+
+Cascades to comparisons, ratings, autouser runs, ai insights, shares,
+invites, access requests. **Irreversible.** Quota counts already burned
+on autouser runs are **not** refunded.
+
+## See also
+
+- [Autousers](/concepts/autousers) — how the personas queue, run, calibrate.
+- [Templates](/concepts/templates) — what gets rated.
+- [Ratings & agreement](/concepts/ratings-and-agreement) — the scoring shape.

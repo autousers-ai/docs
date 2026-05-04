@@ -1,0 +1,159 @@
+---
+title: "Authentication"
+description: "Four auth paths, thirteen scopes, one rule: bearer wins."
+---
+
+Every `/v1` request authenticates as one of four principals. The server
+resolves them in a fixed order; the first match wins.
+
+| Order | Path             | Carrier                                   | Identity              | Scopes                   |
+| ----- | ---------------- | ----------------------------------------- | --------------------- | ------------------------ |
+| 1     | Session          | Supabase cookie                           | User                  | implicit (full)          |
+| 2     | API key          | `Authorization: Bearer ak_live_*`         | API key → User + Team | explicit allowlist       |
+| 3     | OAuth 2.1        | `Authorization: Bearer <jwt>` (aud-bound) | User + Team           | explicit (`scope` claim) |
+| 4     | Figma plugin JWT | `Authorization: Bearer <jwt>`             | User                  | implicit (full)          |
+
+`session` and `figma-token` principals have **no** `scopes` field — they
+authenticate as a real user and inherit that user's team memberships.
+`apikey` and `oauth` principals must present an explicit scope per route
+or get `403 authorization_error: Missing required scope: ...`.
+
+<Note>
+  Scopes are layered on top of, not in place of, the route's permission check.
+  An `ak_live_*` key with `evaluations:write` scoped to team A still cannot
+  write evaluations on team B — `assertTeamAccess` rejects the team mismatch.
+</Note>
+
+## Path 1 — Session cookie (web app)
+
+Used by the dashboard at `app.autousers.ai`. Set automatically by
+Supabase Auth on sign-in. There is nothing for an integrator to do here.
+
+```bash
+curl https://app.autousers.ai/api/v1/auth/whoami \
+  --cookie "sb-...=..."
+```
+
+## Path 2 — API key (`ak_live_*`)
+
+The right choice for **server-to-server**, **CI/CD**, **the CLI**, and
+**the MCP server**. Mint at **Settings → API keys**; you'll see the
+plaintext value once.
+
+```bash
+curl https://app.autousers.ai/api/v1/auth/whoami \
+  -H "Authorization: Bearer ak_live_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+```
+
+Properties:
+
+- Prefixed `ak_live_`; sha256-hashed at rest (never stored plaintext).
+- Bound to the team it was minted on. All requests act on that team.
+- Scopes are explicit and immutable for the life of the key. To change
+  scopes, mint a new key and revoke the old one.
+- Optional expiry; default is no expiry.
+- Last-used IP and timestamp are recorded for audit.
+
+## Path 3 — OAuth 2.1 access token
+
+Audience-bound HS256 JWT minted by `/api/oauth/token` after a user
+authorizes a third-party MCP app or SDK. Tokens are short-lived (≤15
+minutes) and **must** carry an `aud` claim matching the resource server
+they are presented to (RFC 8707). A token minted for `/mcp` will
+**not** verify at `/api/v1/*`, and vice versa.
+
+```bash
+curl https://app.autousers.ai/api/v1/auth/whoami \
+  -H "Authorization: Bearer eyJ..."
+```
+
+Token payload:
+
+```json
+{
+  "sub": "usr_clxq3...",
+  "team": "team_clxq3...",
+  "scope": "evaluations:read autousers:read",
+  "aud": "https://app.autousers.ai/api/v1",
+  "exp": 1714867200
+}
+```
+
+<Warning>
+  Access tokens are **stateless**. Revoking the underlying refresh token stops
+  future refreshes but does not invalidate access tokens already in flight; they
+  expire naturally at their TTL. This is the standard OAuth 2.1 trade-off.
+</Warning>
+
+## Path 4 — Figma plugin JWT
+
+Issued by `/api/auth/figma/*` for the Autousers Figma plugin only. Stored
+in `figma.clientStorage`. 7-day expiry. HS256, signed with a secret
+distinct from the OAuth signing key — Figma JWTs cannot be replayed as
+OAuth tokens or vice versa.
+
+You will not need this unless you are forking the Figma plugin.
+
+## Scopes
+
+Scopes are **resource:action** strings. Use the wildcard sparingly.
+
+| Scope               | Grants                                                 |
+| ------------------- | ------------------------------------------------------ |
+| `*`                 | Admin — every action on every resource family.         |
+| `templates:read`    | List, read templates / dimensions.                     |
+| `templates:write`   | Create, update, delete templates / dimensions.         |
+| `templates:*`       | All template actions.                                  |
+| `evaluations:read`  | List, read evaluations and their nested resources.     |
+| `evaluations:write` | Create, update, delete evaluations.                    |
+| `evaluations:*`     | All evaluation actions.                                |
+| `autousers:read`    | List, read autousers, calibration, runs.               |
+| `autousers:write`   | Create, update, delete autousers; trigger calibration. |
+| `autousers:*`       | All autouser actions.                                  |
+| `ratings:read`      | List ratings on evaluations the caller can read.       |
+| `ratings:write`     | Submit, bulk-delete ratings.                           |
+| `ratings:*`         | All rating actions.                                    |
+
+<Note>
+  When **webhooks ship** (see [Changelog](/changelog)) three more scopes are
+  added: `webhooks:read`, `webhooks:write`, `events:read`.
+</Note>
+
+The literal scope is checked first, then the family wildcard
+(`evaluations:*`), then the admin wildcard (`*`).
+
+## Key rotation
+
+Mint a new key with the same scopes, deploy it, then revoke the old key.
+
+```bash
+# 1. Mint replacement
+curl -X POST https://app.autousers.ai/api/v1/api-keys \
+  --cookie "sb-...=..." \
+  -H "Content-Type: application/json" \
+  -d '{ "name": "ci-2026-q3", "scopes": ["evaluations:read", "evaluations:write"] }'
+
+# 2. Update your secret store with the new key.
+
+# 3. Revoke the old key.
+curl -X DELETE https://app.autousers.ai/api/v1/api-keys/<old_key_id> \
+  --cookie "sb-...=..."
+```
+
+<Warning>
+  `/api/v1/api-keys/*` is **session-only**. You cannot mint or revoke keys with
+  another `ak_live_*` key — that prevents a leaked key from bootstrapping itself
+  into permanence. Use the dashboard or a session cookie.
+</Warning>
+
+## Best practices
+
+- Mint a **separate key per environment** (CI, staging, prod). Revoke
+  blast radius is the key, not the account.
+- Use the **narrowest scope** that works. Reach for `evaluations:read`
+  before `evaluations:*`, and `*` only for break-glass admin tooling.
+- **Rotate keys** annually or when an employee with key access leaves.
+- **Set an expiry** on keys you only need for a known window (a launch,
+  a contractor engagement).
+- Never log the `Authorization` header. Never paste a key into a chat
+  transcript or a screenshot.

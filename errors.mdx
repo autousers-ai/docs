@@ -1,0 +1,142 @@
+---
+title: "Errors"
+description: "One envelope, six error types, every response carries X-Request-Id."
+---
+
+Every error response shares a single envelope. The HTTP status is
+derived from the `error.type` field — clients should branch on `type`,
+not on status code.
+
+```json
+{
+  "error": {
+    "message": "Evaluation not found",
+    "type": "not_found_error",
+    "code": "evaluation_not_found",
+    "request_id": "0192c7f8-dead-beef-9abc-def012345678"
+  }
+}
+```
+
+## Envelope fields
+
+| Field        | Type   | Always set | Notes                                                                                                                                                              |
+| ------------ | ------ | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `message`    | string | yes        | Human-readable. Self-sufficient for surfacing to end users.                                                                                                        |
+| `type`       | enum   | yes        | One of six values, see below.                                                                                                                                      |
+| `code`       | string | no         | Machine-readable sub-classifier (e.g. `evaluation_not_found`).                                                                                                     |
+| `param`      | string | no         | The offending request field, when applicable (`type: invalid_request_error`).                                                                                      |
+| `doc_url`    | string | no         | Link to the relevant doc page.                                                                                                                                     |
+| `request_id` | string | yes        | uuid v7. Same value as the `X-Request-Id` response header.                                                                                                         |
+| `details`    | object | no         | Structured context. Today only set for cross-team `authorization_error` (`code: evaluation_no_access`). Treat as additive — `message` always tells the full story. |
+
+## Error types and status codes
+
+| `error.type`            | HTTP status | When                                                                |
+| ----------------------- | ----------- | ------------------------------------------------------------------- |
+| `authentication_error`  | 401         | Missing, malformed, expired, or revoked credentials.                |
+| `authorization_error`   | 403         | Authenticated, but lacks the required scope or team permission.     |
+| `invalid_request_error` | 400         | Malformed JSON, validation failure, missing required field.         |
+| `not_found_error`       | 404         | Resource does not exist, or the caller has no permission to see it. |
+| `rate_limit_error`      | 429         | Per-tier RPM or monthly quota exceeded. Carries `Retry-After`.      |
+| `api_error`             | 500         | Unexpected server error. Quote the `request_id` to support.         |
+
+<Note>
+  We **conflate "not found" and "no permission"** by design. A 404 from
+  `/v1/evaluations/{id}` means either "no such row" or "you lack membership on
+  its team" — we don't disclose which, to avoid leaking the existence of
+  resources to outsiders.
+</Note>
+
+## `X-Request-Id`
+
+Every response — success or error — carries an `X-Request-Id` header.
+Error responses also embed the same value in `error.request_id` so it
+survives a copy-paste from a screenshot.
+
+```http
+HTTP/1.1 404 Not Found
+Content-Type: application/json
+X-Request-Id: 0192c7f8-dead-beef-9abc-def012345678
+```
+
+The id is a **uuid v7**, sortable by time, which makes log scans cheap.
+It is the single piece of context you should include in every support
+ticket. Do not include the request body; we can pull that ourselves
+from the request id.
+
+```bash
+curl https://app.autousers.ai/api/v1/evaluations/eval_does_not_exist \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY" \
+  -i
+```
+
+## Common error codes
+
+A non-exhaustive list of `error.code` values you may encounter. Codes
+are stable; new ones are added without a version bump.
+
+<Accordion title="evaluation_not_found">
+  The evaluation id does not exist, or the caller has no permission. 404.
+</Accordion>
+<Accordion title="evaluation_no_access">
+  Cross-team request — the resource exists but lives on a team the caller is not
+  a member of. The `details` field carries the resource team name and the
+  caller's email so the UI can render a "switch account" empty state. 403.
+</Accordion>
+<Accordion title="missing_required_scope">
+  An `ak_live_*` or OAuth principal lacks the scope this route demands. The
+  `message` names the scope. 403.
+</Accordion>
+<Accordion title="idempotency_key_reused">
+  The supplied `Idempotency-Key` matches a prior request, but the request body
+  differs. 409. See [Idempotency](/idempotency).
+</Accordion>
+<Accordion title="plan_upgrade_required">
+  The route is gated to a higher pricing tier. Today this fires on webhook
+  endpoints for Free / Team callers. 403.
+</Accordion>
+<Accordion title="rate_limit_exceeded">
+  Per-tier RPM cap hit. Read `Retry-After`. 429. See [Rate
+  limits](/rate-limits).
+</Accordion>
+<Accordion title="quota_exceeded">
+  Monthly quota for autouser ratings, human ratings, or evaluations exhausted.
+  429. Carries no `Retry-After` — the quota resets at the start of the next
+  billing period.
+</Accordion>
+
+## Handling errors
+
+Branch on `error.type` first, `error.code` second. Never branch on the
+HTTP status — the mapping is stable but the field is the contract.
+
+```ts
+async function autousersFetch(path: string, init?: RequestInit) {
+  const res = await fetch(`https://app.autousers.ai${path}`, {
+    ...init,
+    headers: {
+      ...init?.headers,
+      Authorization: `Bearer ${process.env.AUTOUSERS_API_KEY}`,
+    },
+  });
+  if (!res.ok) {
+    const body = await res.json();
+    const requestId = res.headers.get("x-request-id");
+    if (body.error?.type === "rate_limit_error") {
+      const retryAfter = Number(res.headers.get("retry-after") ?? 60);
+      await new Promise((r) => setTimeout(r, retryAfter * 1000));
+      return autousersFetch(path, init);
+    }
+    throw new Error(`${body.error?.message} (request_id=${requestId})`);
+  }
+  return res.json();
+}
+```
+
+## Reporting a bug
+
+Email `contact@autousers.ai` with the `request_id`, the route, and the
+local time of the request. Do not paste the request body — we can pull
+it. Do not paste the API key — we cannot help if you do, and will
+revoke the key on receipt.

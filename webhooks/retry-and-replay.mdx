@@ -1,0 +1,159 @@
+---
+title: "Retry & replay"
+description: "Eight-attempt exponential backoff, the receiver contract, the auto-disable rules."
+---
+
+Network failures and slow receivers are the rule, not the exception.
+The Autousers webhook system is designed around that — the retry
+policy, the backoff schedule, and the auto-disable thresholds are
+fixed and documented so your operations team can plan against them.
+
+## Backoff schedule
+
+Each `WebhookDelivery` retries on a fixed schedule. After eight failed
+attempts the delivery is marked `abandoned`.
+
+| Attempt | Delay since previous attempt |
+| ------- | ---------------------------- |
+| 1       | 0 (initial fire)             |
+| 2       | 60 seconds (1 min)           |
+| 3       | 300 seconds (5 min)          |
+| 4       | 1,800 seconds (30 min)       |
+| 5       | 7,200 seconds (2 h)          |
+| 6       | 21,600 seconds (6 h)         |
+| 7       | 86,400 seconds (24 h)        |
+| 8       | 86,400 seconds (24 h)        |
+| 9       | 86,400 seconds (24 h)        |
+
+Total wall-clock window: ~3 days. Matches Stripe's behaviour by design
+— receivers that work for Stripe work for us.
+
+## Receiver contract
+
+| Receiver response                  | What we do                                                                        |
+| ---------------------------------- | --------------------------------------------------------------------------------- |
+| `2xx`                              | Mark `delivered`. Drop from queue.                                                |
+| `3xx`                              | Treat as failure. **We do not follow redirects.**                                 |
+| `410 Gone`                         | Failure. After 3 consecutive 410s on the endpoint, the endpoint is auto-disabled. |
+| Any other `4xx`                    | Failure. Retry per backoff schedule until exhausted.                              |
+| `5xx`, network error, timeout >10s | Failure. Retry per backoff schedule.                                              |
+| No response within 10s             | Treated as timeout.                                                               |
+
+Return **2xx fast**. Aim for <500ms. Do the actual work asynchronously
+— enqueue a job, then return 200. Holding the connection open is the
+fastest way to burn through your retry budget.
+
+## Auto-disable rules
+
+An endpoint flips to `status: disabled` (and the team Owner is emailed)
+when **any** of the following hold:
+
+- 3 consecutive 410 responses.
+- 100% failure rate over the last 50 deliveries.
+- A manual `PATCH /v1/webhooks/{id}` sets `status: disabled`.
+
+A disabled endpoint receives no new deliveries until you re-enable it.
+Pending retries on already-enqueued deliveries continue.
+
+## Idempotency on the receiver
+
+Retries mean your receiver will see the **same event id** more than
+once. Use the `Autousers-Event-Id` header as the dedup key:
+
+```ts
+const eventId = req.header("autousers-event-id")!;
+
+// Atomic insert-if-absent. If we've seen this id, return 200 without
+// re-running side effects.
+const inserted = await db.events.insertIfAbsent({ id: eventId });
+if (!inserted) return res.status(200).end(); // already processed
+
+await processEvent(req.body);
+res.status(200).end();
+```
+
+`Autousers-Event-Id` is stable across retries of the **same** event
+but distinct from `Autousers-Delivery-Id`, which is unique per
+delivery attempt.
+
+## Inspecting deliveries
+
+```bash
+# Recent deliveries on an endpoint
+curl "https://app.autousers.ai/api/v1/webhooks/$ENDPOINT_ID/deliveries?limit=50" \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY"
+```
+
+```json
+{
+  "data": [
+    {
+      "id": "whd_clxq3...",
+      "endpointId": "whe_clxq3...",
+      "eventId": "event_clxq3...",
+      "attempt": 3,
+      "status": "delivered",
+      "responseStatus": 200,
+      "responseBody": "{\"ok\":true}",
+      "scheduledFor": "2026-05-04T10:01:00.000Z",
+      "deliveredAt": "2026-05-04T10:06:02.000Z"
+    },
+    {
+      "id": "whd_clxq3foo",
+      "attempt": 5,
+      "status": "failed",
+      "responseStatus": 503,
+      "error": "upstream returned 503",
+      "scheduledFor": "2026-05-04T12:01:00.000Z",
+      "deliveredAt": null
+    }
+  ],
+  "has_more": true,
+  "next_cursor": "whd_clxq3..."
+}
+```
+
+Single delivery detail (truncated `responseBody` capped at 4 KB):
+
+```bash
+curl https://app.autousers.ai/api/v1/webhooks/deliveries/$DELIVERY_ID \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY"
+```
+
+## Manual replay
+
+Replay a specific delivery — useful after fixing a receiver bug.
+
+```bash
+curl -X POST https://app.autousers.ai/api/v1/webhooks/deliveries/$DELIVERY_ID/retry \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY"
+```
+
+The replay POSTs the **original event payload** with a fresh signature
+and a new `Autousers-Delivery-Id`. The `Autousers-Event-Id` is
+unchanged — your dedup logic works as expected.
+
+## Event log
+
+Every fired event is also queryable from `/v1/events` regardless of
+which endpoints it was delivered to. Use this to bootstrap a new
+receiver from a known-good time:
+
+```bash
+curl "https://app.autousers.ai/api/v1/events?starting_after=event_lastSeenId&limit=100" \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY"
+```
+
+Retention:
+
+| Plan       | Event log retention |
+| ---------- | ------------------- |
+| Pro        | 90 days             |
+| Enterprise | 1 year              |
+
+## Why no jitter
+
+The schedule above is deterministic, not jittered. We synchronise
+retries across attempts deliberately — receivers that fail with the
+fleet are easier to reason about. Add jitter on **your** side if you
+want it.

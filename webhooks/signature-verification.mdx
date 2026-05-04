@@ -1,0 +1,314 @@
+---
+title: "Signature verification"
+description: "HMAC-SHA256 over `${timestamp}.${raw_body}`. Stripe-style. Five-minute replay window."
+---
+
+Every webhook delivery carries a signature header. **Verify it.**
+Refusing to verify is the single most common way customers ship
+exploitable webhook receivers; we do not consider an unverified
+endpoint a working integration.
+
+## The header
+
+```http
+Autousers-Signature: t=1714867200,v1=8e3a4d9c1f...
+```
+
+| Field | Meaning                                       |
+| ----- | --------------------------------------------- |
+| `t`   | Unix epoch seconds at signing time.           |
+| `v1`  | Hex-encoded HMAC-SHA256 of `${t}.${rawBody}`. |
+
+The signing secret is the `whsec_*` plaintext value you received once
+when creating the endpoint. Rotate via
+`POST /v1/webhooks/{id}/rotate-secret` — the new plaintext is shown
+once; the old secret keeps verifying for 24 hours so deploys can roll.
+
+## The verification rules
+
+A payload is valid iff **all four** hold:
+
+1. The signature header parses (one `t`, one `v1`).
+2. `Math.abs(Date.now()/1000 - t) <= toleranceSec` (default **300**, i.e. 5 minutes).
+3. `HMAC_SHA256(secret, "${t}.${rawBody}").hex() === v1`.
+4. Comparison uses a **constant-time** equality check (`crypto.timingSafeEqual` or equivalent).
+
+Use the **raw bytes** of the request body. Re-serialising via
+`JSON.stringify(JSON.parse(body))` will corrupt the signature on any
+payload with non-canonical key order.
+
+## Reference implementations
+
+<CodeGroup>
+
+```ts TypeScript / Node
+import crypto from "node:crypto";
+
+export function verifyAutousersSignature(
+  rawBody: string | Buffer,
+  header: string | undefined,
+  secret: string,
+  toleranceSec = 300
+): boolean {
+  if (!header) return false;
+  const parts = Object.fromEntries(
+    header.split(",").map((p) => {
+      const [k, ...rest] = p.split("=");
+      return [k.trim(), rest.join("=")];
+    })
+  );
+  const t = Number(parts.t);
+  const sig = parts.v1;
+  if (!t || !sig) return false;
+  if (Math.abs(Date.now() / 1000 - t) > toleranceSec) return false;
+
+  const payload =
+    typeof rawBody === "string"
+      ? Buffer.from(`${t}.${rawBody}`)
+      : Buffer.concat([Buffer.from(`${t}.`), rawBody]);
+
+  const expected = crypto
+    .createHmac("sha256", secret)
+    .update(payload)
+    .digest("hex");
+
+  // Both buffers must be the same length for timingSafeEqual.
+  const a = Buffer.from(sig, "hex");
+  const b = Buffer.from(expected, "hex");
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
+// Express handler — note `express.raw()` to keep the bytes intact.
+import express from "express";
+const app = express();
+
+app.post(
+  "/webhooks/autousers",
+  express.raw({ type: "application/json" }),
+  (req, res) => {
+    const ok = verifyAutousersSignature(
+      req.body, // Buffer because of express.raw()
+      req.header("autousers-signature"),
+      process.env.AUTOUSERS_WEBHOOK_SECRET!
+    );
+    if (!ok) return res.status(400).send("invalid signature");
+    const event = JSON.parse(req.body.toString("utf8"));
+    // ... handle event ...
+    res.status(200).end();
+  }
+);
+```
+
+```python Python
+import hmac, hashlib, time
+
+def verify_autousers_signature(
+    raw_body: bytes,
+    header: str | None,
+    secret: str,
+    tolerance_sec: int = 300,
+) -> bool:
+    if not header:
+        return False
+    try:
+        parts = dict(p.strip().split("=", 1) for p in header.split(","))
+        t = int(parts["t"])
+        sig = parts["v1"]
+    except (KeyError, ValueError):
+        return False
+    if abs(time.time() - t) > tolerance_sec:
+        return False
+
+    expected = hmac.new(
+        secret.encode("utf-8"),
+        f"{t}.".encode("utf-8") + raw_body,
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(sig, expected)
+
+
+# FastAPI handler — request.body() returns the raw bytes.
+from fastapi import FastAPI, Request, HTTPException
+import os, json
+
+app = FastAPI()
+
+@app.post("/webhooks/autousers")
+async def autousers_webhook(request: Request):
+    body = await request.body()
+    header = request.headers.get("autousers-signature")
+    if not verify_autousers_signature(
+        body, header, os.environ["AUTOUSERS_WEBHOOK_SECRET"]
+    ):
+        raise HTTPException(status_code=400, detail="invalid signature")
+    event = json.loads(body)
+    # ... handle event ...
+    return {"ok": True}
+```
+
+```go Go
+package autousers
+
+import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// VerifySignature returns nil iff the header is present, parses, the
+// timestamp is within tolerance, and the HMAC matches.
+func VerifySignature(
+	rawBody []byte,
+	header, secret string,
+	tolerance time.Duration,
+) error {
+	if header == "" {
+		return errors.New("missing signature header")
+	}
+	parts := map[string]string{}
+	for _, p := range strings.Split(header, ",") {
+		kv := strings.SplitN(strings.TrimSpace(p), "=", 2)
+		if len(kv) == 2 {
+			parts[kv[0]] = kv[1]
+		}
+	}
+	tStr, sig := parts["t"], parts["v1"]
+	if tStr == "" || sig == "" {
+		return errors.New("malformed signature header")
+	}
+	tInt, err := strconv.ParseInt(tStr, 10, 64)
+	if err != nil {
+		return err
+	}
+	skew := time.Since(time.Unix(tInt, 0))
+	if skew < 0 {
+		skew = -skew
+	}
+	if skew > tolerance {
+		return errors.New("timestamp outside tolerance")
+	}
+
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(strconv.FormatInt(tInt, 10) + "."))
+	mac.Write(rawBody)
+	expected := hex.EncodeToString(mac.Sum(nil))
+
+	if !hmac.Equal([]byte(sig), []byte(expected)) {
+		return errors.New("signature mismatch")
+	}
+	return nil
+}
+
+// http.Handler example
+//
+//	import "io"
+//	func handler(w http.ResponseWriter, r *http.Request) {
+//	    body, _ := io.ReadAll(r.Body)
+//	    if err := VerifySignature(
+//	        body,
+//	        r.Header.Get("Autousers-Signature"),
+//	        os.Getenv("AUTOUSERS_WEBHOOK_SECRET"),
+//	        5*time.Minute,
+//	    ); err != nil {
+//	        http.Error(w, err.Error(), http.StatusBadRequest)
+//	        return
+//	    }
+//	    // handle event
+//	    w.WriteHeader(http.StatusOK)
+//	}
+```
+
+```ruby Ruby
+require "openssl"
+require "json"
+
+module Autousers
+  def self.verify_signature(raw_body, header, secret, tolerance_sec: 300)
+    return false if header.nil? || header.empty?
+
+    parts = header.split(",").map { |p| p.strip.split("=", 2) }.to_h
+    t   = parts["t"]&.to_i
+    sig = parts["v1"]
+    return false unless t && sig
+
+    return false if (Time.now.to_i - t).abs > tolerance_sec
+
+    expected = OpenSSL::HMAC.hexdigest(
+      OpenSSL::Digest.new("sha256"),
+      secret,
+      "#{t}.#{raw_body}",
+    )
+
+    # constant-time compare
+    Rack::Utils.secure_compare(sig, expected)
+  end
+end
+
+# Sinatra handler — read the raw body before any middleware munges it.
+post "/webhooks/autousers" do
+  request.body.rewind
+  raw = request.body.read
+  unless Autousers.verify_signature(
+    raw,
+    request.env["HTTP_AUTOUSERS_SIGNATURE"],
+    ENV.fetch("AUTOUSERS_WEBHOOK_SECRET"),
+  )
+    halt 400, "invalid signature"
+  end
+  event = JSON.parse(raw)
+  # ... handle event ...
+  status 200
+end
+```
+
+</CodeGroup>
+
+## Common pitfalls
+
+<Warning>
+  **Don't re-serialise the body.** Frameworks that parse JSON before your
+  handler runs will hand you a Ruby Hash / Python dict / JS object whose
+  `JSON.stringify` representation does **not** match the bytes we signed. Use
+  the raw-body middleware (`express.raw`, `Request.body()`,
+  `request.body.read`).
+</Warning>
+
+<Warning>
+  **Don't compare with `===` / `==` / `.equal?`.** A naive equality check leaks
+  signature bytes through timing. Use `timingSafeEqual`, `hmac.compare_digest`,
+  `hmac.Equal`, or `Rack::Utils.secure_compare`.
+</Warning>
+
+<Warning>
+  **Don't trust `req.body.timestamp` over the header `t`.** Some CDNs rewrite or
+  strip request bodies. The `t` in the header is what we signed; verify against
+  that, not against the JSON body.
+</Warning>
+
+## Secret rotation
+
+Rotate when an employee with secret access leaves, after any suspected
+leak, and at least annually:
+
+```bash
+curl -X POST https://app.autousers.ai/api/v1/webhooks/$ENDPOINT_ID/rotate-secret \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY"
+```
+
+```json
+{
+  "id": "whe_clxq3...",
+  "secret": "whsec_n3wRotat3dS3cretShownOnceK33pSafe",
+  "rotatedAt": "2026-05-04T11:00:00.000Z",
+  "previousSecretValidUntil": "2026-05-05T11:00:00.000Z"
+}
+```
+
+The previous secret keeps verifying for **24 hours**, so a rolling
+deploy that updates secrets across replicas does not drop deliveries.
+After 24 hours, only the new secret is valid.

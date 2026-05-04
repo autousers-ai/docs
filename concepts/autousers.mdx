@@ -1,0 +1,130 @@
+---
+title: "Autousers"
+description: "AI personas that drive a real browser, follow a calibrated rubric, and emit structured ratings."
+---
+
+An **autouser** is a UX-research persona implemented as a Computer Use
+agent. It receives a stimulus (URL, screenshot, or video), navigates or
+inspects it the way a real first-time user would, and emits a Rating
+in the same shape a human rater produces.
+
+## Anatomy
+
+| Field               | Type    | Notes                                                    |
+| ------------------- | ------- | -------------------------------------------------------- |
+| `id`                | string  | `auto_<cuid>` for system; `auto_<cuid>` for team.        |
+| `name`              | string  | "First-time buyer", "Power user", "Skeptical evaluator". |
+| `role`              | string  | One-line persona summary surfaced to the model.          |
+| `systemPrompt`      | string  | Full instructions. The model's context.                  |
+| `isSystem`          | boolean | `true` for built-ins; `false` for team-created.          |
+| `visibility`        | enum    | `private` (team) or `public` (team-publishable).         |
+| `calibrationStatus` | enum    | `uncalibrated`, `calibrating`, `calibrated`, `frozen`.   |
+| `activeRubricId`    | string? | The frozen rubric in use, if any.                        |
+
+System autousers are visible to every team. Team autousers are scoped
+to the team that created them.
+
+## Listing
+
+```bash
+curl https://app.autousers.ai/api/v1/autousers \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY"
+```
+
+The default response includes both system and your team's autousers.
+Filter with `?source=system|team`.
+
+## Creating a custom autouser
+
+```bash
+curl -X POST https://app.autousers.ai/api/v1/autousers \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Healthcare-portal patient",
+    "role": "A patient managing chronic conditions through a hospital portal.",
+    "systemPrompt": "You are a 58-year-old patient with hypertension and type-2 diabetes...",
+    "visibility": "private"
+  }'
+```
+
+A new autouser starts `uncalibrated` — it can rate, but its scores have
+no inter-rater reliability data yet.
+
+## Calibration
+
+Calibration is how an autouser learns to **agree with itself** across
+runs. We feed it a small panel of comparisons, run it N times, measure
+the consistency of its ratings, and either freeze the rubric (locking
+in stable behaviour) or iterate the system prompt.
+
+Lifecycle:
+
+```
+uncalibrated  ──►  calibrating  ──►  calibrated  ──►  frozen
+```
+
+| State          | Meaning                                                                        |
+| -------------- | ------------------------------------------------------------------------------ |
+| `uncalibrated` | Never run a calibration pass.                                                  |
+| `calibrating`  | A `CalibrationRun` is in flight.                                               |
+| `calibrated`   | Stable Krippendorff α ≥ 0.6 across recent self-runs.                           |
+| `frozen`       | The rubric is locked. New evaluations use this rubric forever or until thawed. |
+
+Trigger:
+
+```bash
+curl -X POST https://app.autousers.ai/api/v1/autousers/$AUTOUSER_ID/calibration/start \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY"
+```
+
+Watch:
+
+```bash
+curl https://app.autousers.ai/api/v1/autousers/$AUTOUSER_ID/calibration/status \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY"
+```
+
+Freeze when stable:
+
+```bash
+curl -X POST https://app.autousers.ai/api/v1/autousers/$AUTOUSER_ID/calibration/freeze \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY"
+```
+
+Freezing emits a `calibration.frozen` webhook. Downstream pipelines
+should listen for it before promoting an autouser to production.
+
+## Runs
+
+When you call `/v1/evaluations/{id}/run-autousers`, every entry in
+`selectedAutousers` is expanded by `agentCount` into individual
+`AutouserRun` rows. Each row tracks:
+
+- `status`: `pending` → `running` → `completed` or `failed`.
+- `currentStep`, `currentAction`, `currentNarration`: live worker progress.
+- `inputTokens`, `outputTokens`, `estimatedCostUsd`: cost telemetry.
+- `artifactsPath`: GCS prefix for video, screenshots, transcripts.
+
+A failed run does **not** consume autouser-rating quota. A completed
+run produces one Rating per Comparison; total ratings = `agentCount × comparisonCount`.
+
+```bash
+curl https://app.autousers.ai/api/v1/evaluations/$EVAL_ID/autouser-runs/$RUN_ID \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY"
+```
+
+## Cost
+
+Autouser runs price against `gemini-3-flash-preview` (the only Gemini
+SKU with native Computer Use). Typical run: $0.04–$0.12 depending on
+page complexity, navigation depth, and dimension count. Use `dryRun`
+on the parent evaluation to forecast before queueing.
+
+## Built-in personas
+
+We ship a roster of system autousers covering common roles —
+first-time buyer, power user, skeptical evaluator, accessibility-first
+user, support-call-prone novice. They are calibrated against an
+internal benchmark panel and updated quarterly. Custom personas always
+override built-ins for your team.

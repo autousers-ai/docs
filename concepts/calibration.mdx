@@ -1,0 +1,133 @@
+---
+title: "Calibration"
+description: "Measure and improve how closely an autouser's ratings agree with your human raters using Cohen's Kappa, then freeze the rubric when agreement is strong."
+---
+
+Calibration measures how well an autouser agrees with your human raters. It works by comparing the autouser's dimension-level scores against human scores on the same evaluation and computing Cohen's Kappa — a statistical measure of inter-rater agreement that accounts for chance. When agreement is low, the calibration workflow shows you exactly where the autouser diverged from humans, and an AI-assisted optimizer suggests rubric changes to close the gap. Once you are satisfied with agreement, you freeze the rubric version so the autouser always rates against a stable, locked definition.
+
+<Note>
+  Calibration is available on the **Team plan and above** (Team, Pro, BYOK, and
+  Enterprise). It is not available on Free or Indie plans.
+</Note>
+
+## When to calibrate
+
+Calibrate a custom autouser when:
+
+- You have just created a new custom autouser and want to verify it agrees with your team's judgment before using it in production evaluations.
+- Agreement scores on your evaluation results are lower than expected.
+- You have updated the autouser's system prompt and want to confirm the change improved (not degraded) agreement.
+
+You do not need to calibrate built-in autousers — they are maintained by Autousers and validated before release.
+
+## Understanding Cohen's Kappa
+
+Cohen's Kappa (κ) measures agreement between two raters while correcting for the level of agreement you would expect by chance alone. It ranges from −1 to 1.
+
+| Kappa range | Interpretation                                                              |
+| ----------- | --------------------------------------------------------------------------- |
+| \< 0.2      | Poor agreement — the autouser and humans are rating very differently        |
+| 0.2 – 0.4   | Fair agreement — some alignment, but substantial divergence remains         |
+| 0.4 – 0.6   | Moderate agreement — acceptable for exploratory use, worth optimizing       |
+| 0.6 – 0.8   | Substantial agreement — the autouser is a reliable proxy for human judgment |
+| > 0.8       | Near-perfect agreement — the autouser closely tracks human ratings          |
+
+Aim for κ ≥ 0.6 before relying on an autouser as your primary rater. Freeze the rubric once you reach the agreement level your team considers acceptable.
+
+## The calibration workflow
+
+<Steps>
+  <Step title="Run your autouser on an evaluation with human ratings">
+    Calibration requires an evaluation that has both autouser ratings and human ratings on the same comparisons. If you do not yet have human ratings, invite raters via a shareable link or add team members as raters before starting calibration.
+  </Step>
+
+  <Step title="Start calibration">
+    In the dashboard, open your autouser and go to the **Calibration** tab, then click **Start calibration**. Select the evaluation whose human ratings you want to calibrate against.
+
+    Via the MCP or API, call `autousers_calibration_start` with the autouser ID and evaluation ID:
+
+    ```json
+    {
+      "id": "au_your_autouser_id",
+      "evaluationId": "ev_your_evaluation_id"
+    }
+    ```
+
+    The system pairs the autouser's scores with human scores on the same dimensions and computes Cohen's Kappa overall and per dimension.
+
+  </Step>
+
+  <Step title="Review the calibration status">
+    Check the computed Kappa score and the list of disagreements — individual ratings where the autouser and humans scored the same dimension differently.
+
+    Via MCP or API, call `autousers_calibration_status_get` to retrieve the current calibration state, overall Kappa, per-dimension Kappa, and the disagreement list:
+
+    ```json
+    {
+      "id": "au_your_autouser_id"
+    }
+    ```
+
+  </Step>
+
+  <Step title="Optimize the rubric">
+    If agreement is lower than you want, use **Optimize** to send the disagreement data to the AI for rubric suggestions. The optimizer analyzes where the autouser diverged from humans and proposes specific changes to the rubric criteria text to align the autouser's scoring behavior.
+
+    In the dashboard, click **Optimize** on the calibration screen. Via MCP or API, call `autousers_calibration_optimize` with the autouser ID and the disagreement payload:
+
+    ```json
+    {
+      "id": "au_your_autouser_id",
+      "disagreements": [
+        {
+          "ratingId": "rat_123",
+          "humanReasoning": "The navigation was confusing because..."
+        }
+      ]
+    }
+    ```
+
+    Review the suggested changes, edit them if needed, then re-run calibration to see the updated Kappa score.
+
+  </Step>
+
+  <Step title="Freeze the rubric">
+    When you are satisfied with the agreement level, freeze the current rubric version. Freezing locks the rubric so it cannot be modified and sets it as the autouser's active rubric for all future evaluations.
+
+    In the dashboard, click **Freeze rubric**. Via MCP or API, call `autousers_calibration_freeze`:
+
+    ```json
+    {
+      "id": "au_your_autouser_id",
+      "commitMessage": "v2 — optimized for checkout flow evaluations"
+    }
+    ```
+
+    After freezing, the autouser's calibration status changes to `"frozen"` and a `calibration.frozen` webhook fires (see [events](/webhooks/events)) so your downstream tooling can promote the new rubric automatically.
+
+  </Step>
+</Steps>
+
+## MCP tools for calibration
+
+If you work with Autousers through the MCP server, these four tools cover the full calibration workflow:
+
+| Tool                               | What it does                                                                       |
+| ---------------------------------- | ---------------------------------------------------------------------------------- |
+| `autousers_calibration_start`      | Compute Cohen's Kappa between the autouser and human ratings on a given evaluation |
+| `autousers_calibration_status_get` | Return the current calibration status, Kappa scores, and disagreement list         |
+| `autousers_calibration_optimize`   | Send disagreements to AI for rubric improvement suggestions                        |
+| `autousers_calibration_freeze`     | Lock the current rubric version and set it as active                               |
+
+<Tip>
+  The MCP prompt `calibrate-autouser` runs the full calibration loop for you —
+  start, review, optimize, and freeze — in a single guided workflow. You can
+  also use `triage-low-agreement` to surface disagreements and get suggested
+  fixes without committing to a new rubric version.
+</Tip>
+
+## See also
+
+- [Autousers](/concepts/autousers) — what an autouser is and how to create one.
+- [Ratings & agreement](/concepts/ratings-and-agreement) — the rating shape and the agreement formula.
+- [`calibration.frozen` webhook](/webhooks/events#calibration-frozen) — fires when a rubric is locked, so downstream pipelines can promote it.

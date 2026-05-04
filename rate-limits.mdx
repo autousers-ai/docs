@@ -1,0 +1,163 @@
+---
+title: "Rate limits & quotas"
+description: "Per-tier RPM, monthly quotas, and the headers you need to respect."
+---
+
+The Autousers API enforces two limits independently:
+
+1. **RPM** — a sliding-window cap on requests per minute, per team.
+2. **Monthly quotas** — counts of autouser ratings, human ratings, and
+   evaluations created per team per billing period.
+
+Both are tied to your subscription plan.
+
+<Warning>
+  **Beta status (2026-05-04):** tier-aware RPM and monthly quota enforcement is
+  **rolling out**. During beta, the server logs every over-limit request with
+  its `X-Request-Id` but does not yet block. The `X-RateLimit-*` headers are
+  populated on a best-effort basis. Watch the [Changelog](/changelog) for the
+  flip-the-switch announcement before you rely on these limits in production.
+  Build to the contract below now; nothing changes when enforcement lands.
+</Warning>
+
+## Per-plan limits
+
+These mirror the [pricing page](https://autousers.ai/pricing) exactly.
+
+| Plan       | RPM    | Autouser ratings / mo | Human ratings / mo | Evaluations / mo |
+| ---------- | ------ | --------------------- | ------------------ | ---------------- |
+| Free       | 60     | 50                    | 250                | 5                |
+| Team       | 120    | 500                   | 5,000              | 100              |
+| Pro        | 600    | 2,000                 | 20,000             | unlimited        |
+| Enterprise | custom | custom                | custom             | unlimited        |
+
+Limits apply to the **team** the API key is bound to, not the user.
+Multiple keys on one team share the same budget.
+
+## Response headers
+
+Every `/v1` response carries:
+
+| Header                  | Meaning                                           |
+| ----------------------- | ------------------------------------------------- |
+| `X-RateLimit-Limit`     | The team's per-minute limit (e.g. `120`).         |
+| `X-RateLimit-Remaining` | Requests remaining in the current sliding window. |
+| `X-RateLimit-Reset`     | Unix epoch seconds when the window resets.        |
+| `Retry-After`           | Set on 429 only. Seconds to wait before retrying. |
+
+Read these on **every** response — not just 429s. Throttling proactively
+is cheaper than retrying.
+
+## The 429 response
+
+```http
+HTTP/1.1 429 Too Many Requests
+Content-Type: application/json
+Retry-After: 12
+X-RateLimit-Limit: 120
+X-RateLimit-Remaining: 0
+X-RateLimit-Reset: 1714867260
+X-Request-Id: 0192c7f8-...
+```
+
+```json
+{
+  "error": {
+    "message": "Rate limit exceeded — 120 requests per minute on plan team. Retry in 12s.",
+    "type": "rate_limit_error",
+    "code": "rate_limit_exceeded",
+    "request_id": "0192c7f8-..."
+  }
+}
+```
+
+Monthly-quota exhaustion uses `code: quota_exceeded` and **does not**
+carry `Retry-After` — the quota resets at the start of the next billing
+period (visible at `GET /v1/usage`).
+
+## Self-throttling
+
+Call `GET /v1/usage` to read the team's plan and remaining budget without
+firing a real workload request:
+
+```bash
+curl https://app.autousers.ai/api/v1/usage \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY"
+```
+
+```json
+{
+  "plan": "team",
+  "period": { "start": "2026-05-01T00:00:00Z", "end": "2026-06-01T00:00:00Z" },
+  "limits": {
+    "rpm": 120,
+    "autouser_ratings_mo": 500,
+    "human_ratings_mo": 5000,
+    "evals_mo": 100
+  },
+  "used": {
+    "autouser_ratings_mo": 312,
+    "human_ratings_mo": 1840,
+    "evals_mo": 19
+  },
+  "remaining": {
+    "autouser_ratings_mo": 188,
+    "human_ratings_mo": 3160,
+    "evals_mo": 81
+  }
+}
+```
+
+## Exponential backoff with jitter
+
+Treat 429 and 5xx as retryable. Cap at 5 attempts; add jitter so retries
+don't synchronise across replicas.
+
+```ts
+async function fetchWithBackoff(input: RequestInfo, init?: RequestInit) {
+  const max = 5;
+  for (let attempt = 0; attempt < max; attempt++) {
+    const res = await fetch(input, init);
+    if (res.ok) return res;
+
+    const retryable = res.status === 429 || res.status >= 500;
+    if (!retryable || attempt === max - 1) {
+      throw new Error(
+        `Autousers API ${res.status} — request_id=${res.headers.get("x-request-id")}`
+      );
+    }
+
+    const serverHint = Number(res.headers.get("retry-after") ?? 0);
+    const exp = Math.min(60_000, 1000 * 2 ** attempt);
+    const jitter = Math.random() * 250;
+    const wait = serverHint > 0 ? serverHint * 1000 : exp + jitter;
+    await new Promise((r) => setTimeout(r, wait));
+  }
+  throw new Error("unreachable");
+}
+```
+
+## Limits on specific routes
+
+A handful of routes have **stricter** per-user limits independent of
+plan tier:
+
+| Route                          | Limit             | Why                               |
+| ------------------------------ | ----------------- | --------------------------------- |
+| `POST /v1/settings/byok/test`  | 5 / minute / user | Probing a third-party Vertex key. |
+| `POST /v1/settings/byok/probe` | 5 / minute / user | Same.                             |
+| `POST /v1/auth/figma/*`        | 10 / minute / IP  | Unauthenticated pairing surface.  |
+
+These are documented per-route in the [API reference](/api-reference).
+
+## What does not count
+
+- `GET /v1/auth/whoami` — free, unmetered, ping anytime.
+- `GET /v1/usage` — free, unmetered.
+- Webhook **deliveries** (us → you). Your endpoint receiving a webhook
+  is not a request you made; it doesn't consume RPM.
+
+## Enterprise
+
+Custom RPM, unmetered monthly quotas, and dedicated capacity are
+available on Enterprise. Contact `sales@autousers.ai`.

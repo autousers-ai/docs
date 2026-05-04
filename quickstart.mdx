@@ -1,0 +1,176 @@
+---
+title: "Quickstart"
+description: "Mint a key, make your first call, dry-run an evaluation. Five minutes."
+---
+
+By the end of this page you will have:
+
+1. An `ak_live_*` API key.
+2. Confirmed authentication with `/auth/whoami`.
+3. Listed your team's evaluations.
+4. Dry-run a new evaluation (no spend, no DB write).
+5. Created a real evaluation.
+
+## 1. Mint an API key
+
+Go to **Settings → API keys** in the dashboard and click **Create key**.
+
+<Frame>![Create API key dialog](/images/quickstart-mint-key.png)</Frame>
+
+Pick the scopes you need. For this quickstart, select
+`evaluations:read`, `evaluations:write`, and `autousers:read`. See
+[Authentication](/authentication#scopes) for the full vocabulary.
+
+The plaintext key is shown **once**. Store it as `AUTOUSERS_API_KEY` in
+your secret manager. We store only its sha256 hash; if you lose it, mint
+a new one.
+
+<Warning>
+  Keys begin with `ak_live_`. Treat them like passwords — never check them into
+  source, never paste them into chat. They inherit the team membership of
+  whoever minted them.
+</Warning>
+
+```bash
+export AUTOUSERS_API_KEY=ak_live_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+## 2. Confirm authentication
+
+```bash
+curl https://app.autousers.ai/api/v1/auth/whoami \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY"
+```
+
+Response:
+
+```json
+{
+  "userId": "usr_clxq3...",
+  "teamId": "team_clxq3...",
+  "source": "apikey",
+  "scopes": ["evaluations:read", "evaluations:write", "autousers:read"]
+}
+```
+
+If you see `{"error":{"type":"authentication_error",...}}`, your key is
+wrong or revoked. Mint a fresh one.
+
+## 3. List evaluations
+
+```bash
+curl "https://app.autousers.ai/api/v1/evaluations?limit=5" \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY"
+```
+
+The response is a Stripe-style paginated list:
+
+```json
+{
+  "data": [
+    {
+      "id": "eval_clxq3...",
+      "name": "Checkout v2 vs v1",
+      "type": "SxS",
+      "status": "Ended",
+      "...": "..."
+    }
+  ],
+  "has_more": false
+}
+```
+
+Pass `starting_after=<last_id>` to fetch the next page. See
+[Pagination](/pagination).
+
+## 4. Dry-run a new evaluation
+
+Every billable POST that runs autousers supports `dryRun: true`. The
+server validates the payload, returns a cost estimate, and **writes
+nothing** to the database. Use this in CI to fail fast on a malformed
+config before spending tokens.
+
+```bash
+curl https://app.autousers.ai/api/v1/evaluations \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Smoke — checkout v2",
+    "type": "SSE",
+    "status": "Draft",
+    "designUrls": [
+      { "url": "https://staging.example.com/checkout", "label": "v2", "stimulusType": "URL" }
+    ],
+    "selectedAutousers": [
+      { "autouserId": "auto_first_time_buyer", "agentCount": 3 }
+    ],
+    "selectedDimensionIds": ["overall", "trust", "clarity"],
+    "evaluationMethod": "ai",
+    "dryRun": true
+  }'
+```
+
+Response:
+
+```json
+{
+  "dryRun": true,
+  "persisted": false,
+  "autousersQueued": false,
+  "wouldRun": { "autouserCount": 3, "comparisonCount": 1, "totalRuns": 3 },
+  "costEstimate": {
+    "usd": 0.273,
+    "tokens": { "input": 18000, "output": 4200 }
+  },
+  "warnings": [],
+  "note": "PREVIEW ONLY — this evaluation has NOT been created. Re-issue without dryRun:true to persist."
+}
+```
+
+The dry-run echoes the validated payload as `wouldCreate` so the caller
+can confirm exactly what the live POST would persist.
+
+## 5. Create the real evaluation
+
+Drop `dryRun: true` and re-issue the same request:
+
+```bash
+curl https://app.autousers.ai/api/v1/evaluations \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "...": "...same payload, no dryRun..." }'
+```
+
+Response (status `201`):
+
+```json
+{
+  "id": "eval_clxq3...",
+  "name": "Smoke — checkout v2",
+  "status": "Draft",
+  "links": {
+    "preview": "https://app.autousers.ai/evaluations/eval_clxq3.../preview",
+    "review": "https://app.autousers.ai/evaluations/eval_clxq3.../review",
+    "results": "https://app.autousers.ai/evaluations/eval_clxq3.../results"
+  }
+}
+```
+
+To actually run the autousers, `POST` to
+`/v1/evaluations/{id}/run-autousers`. See the
+[Evaluations concept guide](/concepts/evaluations).
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card
+    title="Stop polling — use webhooks"
+    icon="webhook"
+    href="/webhooks/overview"
+  >
+    Get notified when an autouser run completes.
+  </Card>
+  <Card title="Wire the CLI into CI" icon="terminal" href="/integrations/cli">
+    `autousers eval create --template=accessibility` in GitHub Actions.
+  </Card>
+</CardGroup>

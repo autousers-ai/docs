@@ -1,0 +1,154 @@
+---
+title: "Webhooks overview"
+description: "Stop polling. Subscribe to events. Verify signatures. Retry deterministically."
+---
+
+Webhooks let your system react to Autousers events in near-real time
+instead of polling. We POST a signed JSON payload to a URL you control;
+your endpoint returns 2xx; we move on.
+
+<Note>
+  **Beta status (2026-05-04):** webhooks are flag-gated behind
+  `AUTOUSERS_WEBHOOKS_ENABLED=1`. While the flag is off, every `/v1/webhooks/*`
+  route returns `503 Service Unavailable`. Watch the [Changelog](/changelog) for
+  the public flip.
+</Note>
+
+## When to use webhooks
+
+| Use case                                        | Polling  | Webhooks |
+| ----------------------------------------------- | :------: | :------: |
+| Notify Slack when an evaluation completes       |   bad    |    ✓     |
+| Append every rating to a BigQuery table         | terrible |    ✓     |
+| Block a CI deploy on Krippendorff α             |    OK    |    ✓     |
+| Auto-create a Linear ticket on autouser failure |   bad    |    ✓     |
+| Show live progress in a UI                      |   OK¹    |   OK²    |
+
+¹ Use `/v1/evaluations/{id}/autouser-stream` (server-sent events) for
+in-page live progress instead.
+² Webhooks fan out to your backend; surface that to the UI via your own
+WebSocket / SSE.
+
+Polling autouser status burns RPM budget — a 50-comparison eval × 4
+personas = 200 jobs, each taking minutes. Webhooks fire **once** per
+state change.
+
+## How it works
+
+```
+┌──────────┐                    ┌──────────────────┐
+│ Autouser │  state transition  │  WebhookEvent    │
+│   Run    ├───────────────────►│  inserted        │
+└──────────┘                    └────────┬─────────┘
+                                         │
+                                         ▼
+                                ┌──────────────────┐
+                                │ WebhookDelivery  │
+                                │ enqueued (per    │ ──► your endpoint
+                                │ matching         │     POST + sig
+                                │ endpoint)        │
+                                └──────────────────┘
+```
+
+1. An event happens (e.g. `evaluation.completed`).
+2. We insert a `WebhookEvent` row — the immutable record.
+3. For every endpoint subscribed to that type, we enqueue a
+   `WebhookDelivery`.
+4. A worker POSTs the payload, signed with your endpoint's secret.
+5. Your endpoint returns 2xx. We mark `delivered`. Done.
+6. On non-2xx or timeout, we retry — see
+   [Retry & replay](/webhooks/retry-and-replay).
+
+## What we POST
+
+Every request includes:
+
+```http
+POST /your/path HTTP/1.1
+Host: your.app
+Content-Type: application/json
+User-Agent: Autousers-Webhooks/1.0
+Autousers-Signature: t=1714867200,v1=8e3a...
+Autousers-Event-Id: event_clxq3...
+Autousers-Event-Type: evaluation.completed
+Autousers-Delivery-Id: whd_clxq3...
+```
+
+```json
+{
+  "id": "event_clxq3...",
+  "type": "evaluation.completed",
+  "api_version": "2026-05-04",
+  "created": 1714867200,
+  "team_id": "team_clxq3...",
+  "data": {
+    "object": { "id": "eval_clxq3...", "...": "..." }
+  },
+  "request": { "id": "req_01HXY...", "idempotency_key": null }
+}
+```
+
+The body is the **fat payload** — full snapshot of the object at emit
+time. No need for a follow-up GET to fetch detail.
+
+## Setting up an endpoint
+
+```bash
+curl -X POST https://app.autousers.ai/api/v1/webhooks \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://your.app/webhooks/autousers",
+    "description": "prod — slack notifier",
+    "enabled_events": ["evaluation.completed", "autouser_run.failed"]
+  }'
+```
+
+The response includes the **plaintext webhook secret once**. Store it
+in your secret manager; we keep only its sha256 hash.
+
+```json
+{
+  "id": "whe_clxq3...",
+  "url": "https://your.app/webhooks/autousers",
+  "secret": "whsec_3xampLeOnLySh0wnOnceK33pSafe",
+  "enabled_events": ["evaluation.completed", "autouser_run.failed"],
+  "status": "enabled"
+}
+```
+
+## Tier gating
+
+Webhooks are restricted to **Pro and Enterprise** plans. Free and Team
+callers get `403 plan_upgrade_required` on `/v1/webhooks/*` routes.
+This matches the [pricing card](https://autousers.ai/pricing) — the
+"webhooks + REST API" line item.
+
+## Required scopes
+
+| Action                                                | Scope            |
+| ----------------------------------------------------- | ---------------- |
+| List, get endpoints; list deliveries                  | `webhooks:read`  |
+| Create, update, delete endpoints; rotate secret; test | `webhooks:write` |
+| Read the underlying event log (`/v1/events`)          | `events:read`    |
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Event reference" icon="list" href="/webhooks/events">
+    All seven v1 events with example payloads.
+  </Card>
+  <Card
+    title="Signature verification"
+    icon="lock"
+    href="/webhooks/signature-verification"
+  >
+    Production-ready snippets in TypeScript, Python, Go, Ruby.
+  </Card>
+  <Card title="Retry & replay" icon="rotate" href="/webhooks/retry-and-replay">
+    The backoff schedule. The receiver contract. The auto-disable rules.
+  </Card>
+  <Card title="Testing webhooks" icon="flask" href="/webhooks/testing">
+    Send synthetic events. Use ngrok locally.
+  </Card>
+</CardGroup>

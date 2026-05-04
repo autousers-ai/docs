@@ -1,0 +1,106 @@
+---
+title: "Figma plugin"
+description: "Queue an autouser pass on a frame without leaving Figma."
+---
+
+The Autousers Figma plugin lets designers create and run an evaluation
+directly on a frame, view, or prototype URL — no context switch to the
+dashboard.
+
+## Install
+
+Open the Figma plugin manager and search **Autousers**, or visit
+[`autousers.ai/figma`](https://autousers.ai/figma).
+
+The plugin runs in the Figma sandbox; nothing local to install.
+
+## First-run pairing
+
+The first time you open the plugin in a Figma file, it walks you
+through a one-time pairing:
+
+1. Click **Pair with Autousers** in the plugin UI.
+2. Figma opens `app.autousers.ai/figma/pair?code=...`.
+3. Sign in if not already signed in; pick the team.
+4. Return to Figma; the plugin completes pairing automatically.
+
+After pairing, the plugin holds a 7-day Figma JWT in
+`figma.clientStorage`. It refreshes silently before expiry.
+
+The JWT is signed with `AUTOUSERS_JWT_SECRET`, distinct from the OAuth
+signing key — Figma tokens cannot be replayed against the OAuth
+surface or vice versa.
+
+## Workflow
+
+<Steps>
+
+<Step title="Select a frame">
+  Pick the design you want evaluated. The plugin captures a 2x PNG of the
+  selected frame.
+</Step>
+
+<Step title="Pick personas">
+  Choose 1–N autousers from the team's roster. Built-ins are listed first;
+  custom personas below.
+</Step>
+
+<Step title="Pick a template">
+  Select a template (rubric). Inline-create custom dimensions if needed.
+</Step>
+
+<Step title="Preview cost">
+  The plugin calls `POST /v1/evaluations` with `dryRun: true` and shows the
+  per-run cost and the total. Click **Run** to commit.
+</Step>
+
+<Step title="Watch progress">
+  The plugin subscribes to the `autouser-stream` SSE endpoint and shows live
+  action labels as the autousers navigate.
+</Step>
+
+<Step title="Open results">
+  When the evaluation completes, the plugin offers a **View results** button
+  that opens `app.autousers.ai/evaluations/$ID/results` in your browser.
+</Step>
+
+</Steps>
+
+## Architecture
+
+The plugin is a dual-bundle:
+
+- **Sandbox** (`code.ts`): runs in the Figma plugin runtime. Reads the
+  current selection, captures the frame as PNG, calls the API.
+- **iframe UI** (Preact): the visible plugin window. Talks to the
+  sandbox via the standard Figma plugin postMessage bridge.
+
+Both bundles call **the same `/v1` API** with the Figma plugin JWT.
+There is nothing Figma-specific about the API surface.
+
+## Authentication paths
+
+The plugin uses **only** the Figma JWT path documented in
+[Authentication](/authentication#path-4-figma-plugin-jwt). It does not
+hold an `ak_live_*` key — the JWT is bound to the user, expires after
+7 days, and is scoped to all teams the user belongs to.
+
+To use the plugin under a different team, switch your active team in
+the dashboard and reload the plugin.
+
+## What it does NOT do
+
+- It does not upload the actual Figma file. Only the captured PNG of
+  the selected frame plus a metadata blob (frame name, file id, page
+  id) is sent.
+- It does not export designs to anywhere else; ratings and results
+  live in `app.autousers.ai`.
+- It does not access other plugins' state.
+
+## Forking the plugin
+
+Source lives at [`autousers/figma`](https://github.com/autousers/figma).
+The MIT-licensed bundle is what we ship to the Figma community store.
+Fork freely; if you publish a fork, drop the "Autousers" branding.
+
+See `docs/FIGMA_PLUGIN.md` in the main repo for build instructions.

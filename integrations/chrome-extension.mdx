@@ -1,0 +1,105 @@
+---
+title: "Chrome extension"
+description: "Live-rate the URL in your tab. Smoke tests in seconds."
+---
+
+The Autousers Chrome extension lets you launch an evaluation against
+the URL in the active tab. Useful for product managers checking a
+staging URL, designers smoke-testing a deploy preview, or sales
+running a live demo.
+
+## Install
+
+[Chrome Web Store → Autousers](https://chrome.google.com/webstore/detail/autousers/)
+
+Available for Chromium-based browsers (Chrome, Edge, Brave, Arc, Opera).
+
+## First-run
+
+1. Click the Autousers icon in the toolbar.
+2. Click **Sign in**. A browser tab opens at
+   `app.autousers.ai/extension/pair`.
+3. Sign in if necessary. Pick a team.
+4. The extension captures a session cookie + a short-lived API key
+   bound to the team.
+
+The credential is stored in the extension's
+[`chrome.storage.session`](https://developer.chrome.com/docs/extensions/reference/api/storage)
+— wiped when the browser closes. Re-pair on next launch.
+
+## Workflow
+
+<Steps>
+
+<Step title="Open the URL you want to evaluate">
+  Any `https://` URL works. The extension does not require any markup on the
+  target page.
+</Step>
+
+<Step title="Click the toolbar icon">
+  The popup opens. The current tab URL is pre-filled.
+</Step>
+
+<Step title="Pick personas + template">
+  Same picker as the Figma plugin. Built-ins first, custom personas below.
+</Step>
+
+<Step title="Click Run">
+  The extension calls `POST /v1/evaluations` with `dryRun: true`, shows the
+  cost, then on confirm re-issues without `dryRun`.
+</Step>
+
+<Step title="Watch in the popup or open the dashboard">
+  The popup shows a live progress bar fed by the `autouser-stream` SSE endpoint.
+  Click **Open in dashboard** for the full experience.
+</Step>
+
+</Steps>
+
+## Live-rate mode
+
+A second flow lets the extension open a sidebar on the current page
+and surface autouser ratings as they arrive:
+
+1. Click **Live-rate** in the popup.
+2. The extension injects a sidebar iframe onto the page.
+3. Autousers run; ratings appear in the sidebar in real time, anchored
+   to the dimensions on the active template.
+4. The sidebar persists across navigation within the same origin
+   until you close it.
+
+Useful for screen-share demos and live product reviews.
+
+## Permissions
+
+The extension requests:
+
+| Permission  | Why                                                            |
+| ----------- | -------------------------------------------------------------- |
+| `activeTab` | Read the URL of the current tab on user click.                 |
+| `storage`   | Persist the session token between popup opens.                 |
+| `scripting` | Inject the live-rate sidebar iframe on user request.           |
+| `cookies`   | Read the `app.autousers.ai` session cookie for first-run pair. |
+
+It does **not** request broad host permissions. The extension cannot
+read or modify pages other than the one you click **Live-rate** on.
+
+## Authentication paths
+
+The extension uses two paths, depending on flow:
+
+- **Popup → API**: short-lived `ak_live_*` key minted at pair time and
+  stored in `chrome.storage.session`. Scopes:
+  `evaluations:read`, `evaluations:write`, `autousers:read`.
+- **Live-rate sidebar**: same key.
+
+Both expire on browser close. There is no long-lived credential.
+
+## Privacy
+
+- The extension does not screenshot or scrape the active tab. The
+  autouser run pulls its own copy of the URL via the GKE worker, which
+  navigates the page in a clean browser.
+- Live-rate sidebar data is loaded over CORS from
+  `app.autousers.ai`; no page DOM is read.
+- No analytics; no third-party requests.

@@ -1,0 +1,171 @@
+---
+title: "Testing webhooks"
+description: "Send synthetic events. Tunnel localhost. Replay deliveries."
+---
+
+Don't wait for a real evaluation to complete before testing your
+endpoint. Three options, in order of how often you'll use them.
+
+## 1. Send a synthetic event
+
+The fastest loop. Fires a real signed POST with a representative
+payload at the endpoint URL on file. No DB side effects.
+
+```bash
+curl -X POST https://app.autousers.ai/api/v1/webhooks/$ENDPOINT_ID/test \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "type": "evaluation.completed" }'
+```
+
+Response:
+
+```json
+{
+  "deliveryId": "whd_test_clxq3...",
+  "status": "pending",
+  "synthetic": true,
+  "scheduledFor": "2026-05-04T10:00:00.000Z"
+}
+```
+
+The synthetic payload uses `event_id` prefix `event_test_*` so your
+receiver can branch on test vs prod if needed (or treat them
+identically — recommended).
+
+You can request any of the seven event types in the `type` field. The
+payload mirrors a real event of that type, with `team_id` set to your
+team and `data.object.id` carrying a `_test_` infix.
+
+## 2. Tunnel localhost
+
+For active development, expose your local server with a tunnel so we
+can reach it. Three good options:
+
+<Tabs>
+<Tab title="ngrok">
+
+```bash
+# Static-domain free tier: install once, login, tunnel.
+brew install ngrok
+ngrok config add-authtoken $YOUR_NGROK_TOKEN
+ngrok http 3000
+```
+
+```
+Forwarding   https://hippo-rare-koi.ngrok-free.app -> http://localhost:3000
+```
+
+Use `https://hippo-rare-koi.ngrok-free.app/webhooks/autousers` as the
+endpoint URL when creating the webhook. ngrok logs every inbound
+request at `http://localhost:4040`.
+
+</Tab>
+<Tab title="cloudflared">
+
+```bash
+brew install cloudflared
+cloudflared tunnel --url http://localhost:3000
+```
+
+Cloudflare prints an ephemeral `https://*.trycloudflare.com` URL.
+
+</Tab>
+<Tab title="Vercel preview deploy">
+
+If you're already on Vercel, push a branch and use the preview URL —
+it's a real cert, real DNS, free, and survives reboots.
+
+```
+https://your-app-git-feature-webhook.vercel.app/api/webhooks/autousers
+```
+
+</Tab>
+</Tabs>
+
+## 3. Use webhook.site for blind smoke tests
+
+When you want to confirm we send what we say we send — no receiver
+code needed:
+
+1. Open [webhook.site](https://webhook.site) and copy the unique URL.
+2. Create an endpoint pointing at it.
+3. Fire `POST /v1/webhooks/$ID/test`.
+4. Inspect the request on webhook.site — headers, body, signature.
+
+Useful for verifying signature math by pasting the body and the
+secret into a local script.
+
+## CLI workflow
+
+The Autousers CLI wraps the synthetic-event flow:
+
+```bash
+# Install
+npm i -g @autousers/cli
+
+# Login and select team
+autousers auth login
+autousers team select
+
+# Fire a synthetic event at every enabled endpoint on the team
+autousers webhooks trigger evaluation.completed
+
+# Tail recent deliveries
+autousers webhooks deliveries --endpoint whe_clxq3... --limit 20
+
+# Replay a specific delivery
+autousers webhooks replay whd_clxq3...
+```
+
+See [the CLI reference](/integrations/cli).
+
+## A first-call sanity check
+
+A 30-second loop to confirm everything works end-to-end.
+
+```bash
+# 1. Mint an API key with webhooks:write scope (in the dashboard).
+export AUTOUSERS_API_KEY=ak_live_...
+
+# 2. Create an endpoint pointing at webhook.site.
+ENDPOINT=$(curl -s -X POST https://app.autousers.ai/api/v1/webhooks \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://webhook.site/your-uuid",
+    "enabled_events": ["evaluation.completed"]
+  }' | jq -r .id)
+
+# 3. Fire a synthetic event.
+curl -X POST https://app.autousers.ai/api/v1/webhooks/$ENDPOINT/test \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "type": "evaluation.completed" }'
+
+# 4. Refresh webhook.site — see the request, copy the body and the
+#    Autousers-Signature header.
+
+# 5. Verify the signature with the snippet from
+#    /webhooks/signature-verification using your endpoint's secret.
+```
+
+## Common questions
+
+<Accordion title="Do test events count against my quota?">
+  No. Synthetic events are free and do not consume RPM, monthly quota, or
+  evaluation quota. They do produce a real `WebhookDelivery` row in the log so
+  you can verify retry behaviour end-to-end.
+</Accordion>
+
+<Accordion title="Will my receiver get duplicate test events?">
+  Only if it returns non-2xx — the same retry schedule applies to synthetic
+  deliveries. Use this to test your receiver's idempotency.
+</Accordion>
+
+<Accordion title="Can I test in CI?">
+  Yes. The CLI is unauthenticated except for the API key — drop
+  `AUTOUSERS_API_KEY` in CI env and run `autousers webhooks trigger ...` as a
+  step. See the [GitHub Actions
+  recipe](/integrations/recipes#github-actions-gate).
+</Accordion>

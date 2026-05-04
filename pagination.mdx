@@ -1,0 +1,137 @@
+---
+title: "Pagination"
+description: "Stripe-style cursor pagination — stable across writes, no offsets, no skipped rows."
+---
+
+List endpoints return at most 100 items per page, ordered most-recent
+first. The response envelope is uniform:
+
+```json
+{
+  "data": [
+    /* up to `limit` items */
+  ],
+  "has_more": true,
+  "next_cursor": "eval_clxq3..."
+}
+```
+
+`total_count` is **not** included by default — it is only set when it is
+cheap to compute (notably absent on `/v1/evaluations`). If you need a
+count, page through to exhaustion.
+
+## Query parameters
+
+| Param            | Type    | Default | Notes                                         |
+| ---------------- | ------- | ------- | --------------------------------------------- |
+| `limit`          | integer | 20      | 1–100. Larger pages reduce RPM consumption.   |
+| `starting_after` | string  | —       | Cursor — fetch items strictly after this id.  |
+| `ending_before`  | string  | —       | Cursor — fetch items strictly before this id. |
+
+`starting_after` and `ending_before` are mutually exclusive. The cursor
+value is always an item id from a prior page; do not synthesise it.
+
+## Forward pagination
+
+```bash
+# Page 1
+curl "https://app.autousers.ai/api/v1/evaluations?limit=50" \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY"
+```
+
+```json
+{
+  "data": [
+    { "id": "eval_05", "...": "..." },
+    "...",
+    { "id": "eval_56", "...": "..." }
+  ],
+  "has_more": true,
+  "next_cursor": "eval_56"
+}
+```
+
+```bash
+# Page 2 — pass the previous next_cursor
+curl "https://app.autousers.ai/api/v1/evaluations?limit=50&starting_after=eval_56" \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY"
+```
+
+Loop until `has_more === false`.
+
+## Walking a list to exhaustion
+
+<CodeGroup>
+```ts TypeScript
+async function listAllEvaluations() {
+  const out: Evaluation[] = [];
+  let cursor: string | undefined;
+  while (true) {
+    const url = new URL("https://app.autousers.ai/api/v1/evaluations");
+    url.searchParams.set("limit", "100");
+    if (cursor) url.searchParams.set("starting_after", cursor);
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${process.env.AUTOUSERS_API_KEY}` },
+    });
+    const page = await res.json();
+    out.push(...page.data);
+    if (!page.has_more) break;
+    cursor = page.next_cursor;
+  }
+  return out;
+}
+```
+
+```python Python
+import os, requests
+def list_all_evaluations():
+    out, cursor = [], None
+    while True:
+        params = {"limit": 100}
+        if cursor:
+            params["starting_after"] = cursor
+        r = requests.get(
+            "https://app.autousers.ai/api/v1/evaluations",
+            headers={"Authorization": f"Bearer {os.environ['AUTOUSERS_API_KEY']}"},
+            params=params,
+            timeout=30,
+        )
+        r.raise_for_status()
+        page = r.json()
+        out.extend(page["data"])
+        if not page["has_more"]:
+            return out
+        cursor = page["next_cursor"]
+```
+
+</CodeGroup>
+
+## Why cursors, not offsets
+
+Cursor pagination is **stable across writes**. With offset pagination,
+inserting a new evaluation while you page mid-list shifts every
+subsequent item by one and silently skips a row. Cursors anchor on a
+specific id and are immune.
+
+## Ordering
+
+Default order is `updatedAt DESC` for the first page, then `id DESC`
+once a cursor is supplied. Order is **not configurable**. If you need a
+different ordering (oldest first, by name), fetch the page and sort
+client-side.
+
+## Edge cases
+
+<Note>
+  An empty page (`data: []`, `has_more: false`) is a valid terminal state — do
+  not retry. It just means there is nothing on this team matching your filter.
+</Note>
+
+<Warning>
+  Cursors are **not portable across endpoints**. A cursor from `/v1/evaluations`
+  cannot be used on `/v1/autousers`.
+</Warning>
+
+A cursor referring to a deleted item still works — it's a sort anchor,
+not a row read. The page after the deleted item returns as if it were
+still there.

@@ -1,0 +1,103 @@
+---
+title: "Versioning"
+description: "What's stable, what's safe to add, and how we sunset what's not."
+---
+
+The `/v1` surface is **stable**. We will not ship a breaking change
+inside `/v1`. Once a route, request shape, or response shape is
+published, it stays — that's the whole point of a `v1`.
+
+## What counts as breaking
+
+These changes require a new version namespace. They will never ship
+inside `/v1`:
+
+- Removing or renaming a field in a response.
+- Removing or renaming an endpoint.
+- Changing the type of a field (e.g. string → number).
+- Adding a required request field.
+- Tightening validation (e.g. a previously-accepted value now rejected).
+- Changing the meaning of a value (e.g. `"Draft"` → `"draft"`).
+
+## What's safe to ship without a version bump
+
+- Adding a new endpoint.
+- Adding a new optional field to a request.
+- Adding a new field to a response.
+- Adding new enum values (where consumers were already prepared to
+  handle unknown values — we document this per-route).
+- Loosening validation.
+- Performance improvements.
+- New `error.code` values inside an existing `error.type`.
+
+Build your client tolerantly — ignore unknown response fields, treat
+unknown enum values as a degraded-but-safe default.
+
+## When breaking changes happen
+
+A new versioned namespace ships (e.g. `/v2/foo`). The old `/v1/foo`
+stays alive **at least 12 months** with the deprecation headers below.
+Existing consumers get the full 12 months to migrate.
+
+```http
+Deprecation: true
+Sunset: Sun, 04 Apr 2027 00:00:00 GMT
+Link: <https://docs.autousers.ai/api-reference/foo>; rel="successor-version"
+```
+
+Watch for these headers in production responses; surface them in your
+own logs so a quietly-introduced sunset doesn't become a Friday
+emergency.
+
+## Aliases
+
+When we rename an internal noun to a product noun, the old route stays
+working as an alias for the full sunset window. Today the canonical
+example is **templates** vs **dimensions**:
+
+| Canonical         | Alias (deprecated) | Status                                                       |
+| ----------------- | ------------------ | ------------------------------------------------------------ |
+| `/v1/templates/*` | `/v1/dimensions/*` | `Deprecation: true`, `Sunset: Sun, 04 Apr 2027 00:00:00 GMT` |
+
+Both keep working through 04 Apr 2027. After that the alias 410s. The
+[reference](/api-reference) only documents `/templates`.
+
+## Header-pinned versions (future)
+
+If we ever need version-specific behaviour on the same URL — rare —
+clients will pin via:
+
+```http
+Autousers-Version: 2026-05-04
+```
+
+The default is the current version. Old dated versions stay reachable
+for at least 12 months from the day they are superseded. **Not yet
+implemented.** When it ships, we will add a per-route version selector
+and the request/response examples in the [reference](/api-reference)
+will gain a version dropdown.
+
+## How to track changes
+
+| Channel                              | What lands there                                     |
+| ------------------------------------ | ---------------------------------------------------- |
+| [Changelog](/changelog)              | Every API-affecting change, dated, in plain English. |
+| `Deprecation` / `Sunset` headers     | Per-route, machine-readable.                         |
+| Email (Pro + Enterprise)             | 60 / 14 days before sunset, sent to team Owners.     |
+| Status banner on `docs.autousers.ai` | At 90 / 30 / 7 days before sunset.                   |
+
+## What we will not do
+
+- Rename fields silently. Renames ship as **additions** for one version
+  and **removals** in the next; the rename always crosses a version bump.
+- Repurpose `error.type` values. New conditions get new types.
+- Change the response shape of a route inside a version, even by
+  adding required fields. Additive optional fields only.
+
+## OpenAPI as source of truth
+
+The full machine-readable contract lives at
+[`/api/v1/openapi.json`](https://app.autousers.ai/api/v1/openapi.json).
+SDKs, the in-page playground, the CLI, and the MCP server all derive
+from it. If the spec and this prose disagree, the spec wins; file an
+issue.

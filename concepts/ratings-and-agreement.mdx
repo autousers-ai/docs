@@ -1,0 +1,132 @@
+---
+title: "Ratings & agreement"
+description: "Per-rater verdicts and the reliability math that aggregates them."
+---
+
+A **Rating** is a single rater's verdict on a single comparison. Humans
+and autousers produce the same shape so downstream analytics doesn't
+have to branch on `raterType`.
+
+## Shape
+
+```json
+{
+  "id": "rat_clxq3...",
+  "evaluationId": "eval_clxq3...",
+  "comparisonId": "cmp_clxq3...",
+  "raterType": "human",
+  "userId": "usr_clxq3...",
+  "publicRaterId": null,
+  "autouserId": null,
+  "autouserRunId": null,
+  "rubricVersion": "v3",
+  "dimensionRatings": {
+    "overall": 4,
+    "trust": 3,
+    "clarity": 5
+  },
+  "openTextResponses": {
+    "overall": "Felt fast but the trust signals were thin.",
+    "trust": "No security badge, no review count."
+  },
+  "factors": null,
+  "justification": "Liked the simplicity, missed the social proof.",
+  "skipReason": null,
+  "timeSpentSeconds": 87,
+  "timingData": {
+    /* ... */
+  },
+  "createdAt": "2026-05-04T10:21:08.123Z"
+}
+```
+
+Discriminator:
+
+| Field           | Set when                                  |
+| --------------- | ----------------------------------------- |
+| `userId`        | Authenticated user submitted this rating. |
+| `publicRaterId` | Anonymous public rater (no account).      |
+| `autouserId`    | An autouser run produced it.              |
+| `autouserRunId` | The specific run row.                     |
+
+Exactly one of `(userId, publicRaterId)` is set on human ratings;
+exactly one of `(autouserId, autouserRunId)` is set on autouser ratings.
+
+## Listing
+
+```bash
+curl "https://app.autousers.ai/api/v1/evaluations/$EVAL_ID/ratings?limit=100" \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY"
+```
+
+Cursor-paginate with `starting_after`. See [Pagination](/pagination).
+
+## Submitting a human rating via the API
+
+Most ratings come from the dashboard or the public share link. If you
+need to submit one programmatically (e.g. wiring up a custom rater UI):
+
+```bash
+curl -X POST https://app.autousers.ai/api/v1/evaluations/$EVAL_ID/ratings \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $(uuidgen)" \
+  -d '{
+    "comparisonId": "cmp_clxq3...",
+    "dimensionRatings": { "overall": 4, "trust": 3, "clarity": 5 },
+    "justification": "Smooth flow, weak trust signals.",
+    "timeSpentSeconds": 87
+  }'
+```
+
+## Agreement
+
+Once you have ratings from ≥3 raters per comparison, agreement metrics
+become useful. The `/agreement` endpoint computes Krippendorff α and,
+when there are exactly two raters, Cohen κ.
+
+```bash
+curl https://app.autousers.ai/api/v1/evaluations/$EVAL_ID/agreement \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY"
+```
+
+```json
+{
+  "krippendorff": { "alpha": 0.74, "n_raters": 6, "n_items": 4 },
+  "byDimension": {
+    "overall": { "alpha": 0.81 },
+    "trust": { "alpha": 0.62 },
+    "clarity": { "alpha": 0.79 }
+  },
+  "ratingCount": 24,
+  "cachedAt": "2026-05-04T11:02:13.000Z"
+}
+```
+
+### What the numbers mean
+
+| α range       | Reading                                              |
+| ------------- | ---------------------------------------------------- |
+| α < 0.4       | No agreement. Treat results as anecdote, not signal. |
+| 0.4 ≤ α < 0.6 | Weak. Useful directional, not for promotion gating.  |
+| 0.6 ≤ α < 0.8 | Acceptable. Most teams ship gates at α ≥ 0.6.        |
+| α ≥ 0.8       | Strong. Suitable for automated CI gates.             |
+
+Cohen κ uses the same scale. When >2 raters are present we report only
+Krippendorff (κ is undefined for >2 raters).
+
+## Caching
+
+Agreement is cached on `Evaluation.agreementCache` and only recomputed
+when the rating count changes. The first call after a new rating is
+slightly slower (~100ms) as it warms the cache; subsequent calls are
+instant.
+
+## Streaming ratings into a warehouse
+
+The shape is stable — `dimensionRatings` is a JSON map, `factors` and
+`openTextResponses` are JSON. Subscribe to the `rating.created` webhook
+(see [Events](/webhooks/events)) and append rows to BigQuery / Snowflake
+as they arrive. Use `Autousers-Event-Id` as the dedup key on insert.
+
+See the [Looker / BigQuery recipe](/integrations/recipes#looker-bigquery-sync).

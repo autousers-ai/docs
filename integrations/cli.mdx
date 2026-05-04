@@ -1,0 +1,162 @@
+---
+title: "CLI"
+description: "@autousers/cli — every /v1 route from your terminal, in CI, in a Makefile."
+---
+
+The Autousers CLI wraps `/v1` with a typed, scriptable interface. Use
+it in CI to gate deploys on UX scores, in cron to bootstrap nightly
+evals, or interactively to explore an evaluation while debugging.
+
+## Install
+
+```bash
+npm i -g @autousers/cli
+```
+
+Global install. Self-updates with `autousers self-update`. Source on
+GitHub at [`autousers-ai/cli`](https://github.com/autousers-ai/cli).
+
+## Auth
+
+```bash
+# Interactive — opens a browser to mint a key.
+autousers auth login
+
+# Or use an existing key.
+export AUTOUSERS_API_KEY=ak_live_...
+```
+
+`auth login` mints the key with sensible defaults
+(`evaluations:read`, `evaluations:write`, `autousers:read`,
+`autousers:write`, `ratings:read`). Pass `--scopes "<list>"` to
+override.
+
+The key is stored in the system keychain (macOS Keychain, libsecret on
+Linux, Windows Credential Locker). Never written to disk in plaintext.
+
+## TUI
+
+Run without arguments to drop into a terminal UI:
+
+```bash
+autousers
+```
+
+Lists evaluations, drills into runs, shows live progress, follows
+deliveries. Designed for the local-debugging case where you want to
+see what the API sees without writing a script.
+
+## Commands
+
+A representative subset:
+
+```bash
+# Evaluations
+autousers eval list
+autousers eval get $EVAL_ID
+autousers eval create --template accessibility \
+                      --url https://staging.example.com/checkout \
+                      --autousers first-time-buyer:3,power-user:2
+autousers eval delete $EVAL_ID
+autousers eval results $EVAL_ID
+autousers eval agreement $EVAL_ID
+
+# Autousers
+autousers autouser list
+autousers autouser create --from-prompt "A patient managing chronic conditions..."
+autousers autouser calibrate $AUTOUSER_ID
+autousers autouser freeze $AUTOUSER_ID
+
+# Templates
+autousers template list
+autousers template create --from-file ./trust-template.json
+
+# Webhooks (when the feature flag flips)
+autousers webhooks list
+autousers webhooks create --url https://your.app/webhooks --events evaluation.completed
+autousers webhooks trigger evaluation.completed --endpoint $ENDPOINT_ID
+autousers webhooks deliveries --endpoint $ENDPOINT_ID --limit 50
+
+# Misc
+autousers whoami
+autousers usage
+autousers self-update
+```
+
+`--help` on any command for the full surface.
+
+## Output formats
+
+```bash
+# Human-readable (default)
+autousers eval list
+
+# JSON for scripting
+autousers eval list --json
+
+# Selective fields with jq
+autousers eval list --json | jq '.[] | {id, name, status}'
+```
+
+## In CI
+
+The `--json` mode + a non-zero exit code on failure makes the CLI a
+drop-in step in any pipeline:
+
+```yaml
+# .github/workflows/eval-checkout.yml
+name: Evaluate checkout
+on:
+  pull_request:
+    paths: ["app/checkout/**"]
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with: { node-version: 22 }
+      - run: npm i -g @autousers/cli
+      - name: Smoke eval
+        env:
+          AUTOUSERS_API_KEY: ${{ secrets.AUTOUSERS_API_KEY }}
+        run: |
+          # Create + run + wait + assert α >= 0.6
+          EVAL_ID=$(autousers eval create \
+            --template accessibility \
+            --url ${{ steps.preview.outputs.preview_url }} \
+            --autousers first-time-buyer:3 \
+            --json | jq -r .id)
+          autousers eval run $EVAL_ID
+          autousers eval wait $EVAL_ID --timeout 600
+          ALPHA=$(autousers eval agreement $EVAL_ID --json | jq -r .krippendorff.alpha)
+          [ "$(echo "$ALPHA >= 0.6" | bc)" -eq 1 ] || exit 1
+```
+
+See the [GitHub Actions recipe](/integrations/recipes#github-actions-gate)
+for a more complete example.
+
+## Profiles
+
+Switch between teams without re-logging-in:
+
+```bash
+autousers profile list
+autousers profile add personal --key ak_live_xxx
+autousers profile add work     --key ak_live_yyy
+autousers profile use work
+```
+
+Every command honours the active profile; pass `--profile <name>` to
+override per-command.
+
+## Updates
+
+The CLI checks npm for updates on each invocation (cached for 24h)
+and prints a one-line nudge when a new version is out.
+
+```bash
+autousers self-update
+# or
+npm i -g @autousers/cli@latest
+```

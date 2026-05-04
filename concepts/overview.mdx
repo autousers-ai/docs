@@ -1,0 +1,177 @@
+---
+title: "Concepts"
+description: "How Autousers thinks. Read this before writing your first integration."
+---
+
+Autousers is an AI-first UX evaluation platform. The data model is
+shaped by that — five nouns explain almost everything you'll do
+through the API.
+
+## The five nouns
+
+<CardGroup cols={2}>
+  <Card title="Evaluation" icon="clipboard-check" href="/concepts/evaluations">
+    A study. Either an SSE (single design review) or an SxS (side-by-side
+    comparison). Has a lifecycle Draft → Running → Ended.
+  </Card>
+  <Card title="Autouser" icon="robot" href="/concepts/autousers">
+    An AI persona that drives a real browser, navigates the design, and emits
+    structured ratings.
+  </Card>
+  <Card title="Template" icon="list-checks" href="/concepts/templates">
+    A reusable question set, composed of dimensions like Usability, Visual
+    Design, Accessibility.
+  </Card>
+  <Card title="Rating" icon="star" href="/concepts/ratings-and-agreement">
+    A single rater's verdict on a single comparison. Humans and autousers
+    produce the same shape.
+  </Card>
+  <Card title="Team" icon="users" href="/concepts/teams-and-permissions">
+    The ownership boundary. Every resource lives on exactly one team.
+  </Card>
+</CardGroup>
+
+## How they fit together
+
+```
+Team
+└── Evaluation        (status: Draft | Running | Ended; type: SSE | SxS)
+    ├── Comparison    (one per stimulus, or one per A/B pair)
+    │   └── Rating    (per rater × per comparison × per dimension)
+    ├── Autouser      (selected persona, expanded by agentCount)
+    │   └── AutouserRun
+    │       └── Rating
+    ├── Template      (one per evaluation; composed of dimensions)
+    └── AiInsight     (auto-generated narrative + structured action items)
+```
+
+A typical SxS workflow looks like:
+
+1. `POST /v1/evaluations` with `type: "SxS"`, two `comparisonPairs`, three `selectedAutousers`, a chosen template.
+2. `POST /v1/evaluations/{id}/run-autousers` queues the AI runs.
+3. (Optional) raters land on the public share link and produce human ratings.
+4. `GET /v1/evaluations/{id}/agreement` computes Krippendorff α across all raters.
+5. `GET /v1/evaluations/{id}/ai-insights` returns a synthesised narrative.
+
+## Where the work happens
+
+| Component      | Runs in                    | Bills against                               |
+| -------------- | -------------------------- | ------------------------------------------- |
+| Autouser run   | GKE Autopilot, browser pod | `autouser_ratings_mo` quota + token cost    |
+| Human rating   | The rater's browser        | `human_ratings_mo` quota                    |
+| Agreement calc | Postgres + Node, on demand | Free, cached on `Evaluation.agreementCache` |
+| AI insights    | Gemini, on demand          | Negligible — single completion              |
+
+## What's deliberately not in `/v1`
+
+- **Bulk evaluation creation** — every eval has nuance; we'd rather you
+  loop than express that complexity in a single payload.
+- **Synchronous autouser runs** — too slow. The pattern is "POST →
+  webhook" (see [Webhooks](/webhooks/overview)).
+- **Public listing of all autousers** — system autousers (`isSystem: true`)
+  are visible to all; team autousers are scoped to the team.
+
+## Concept reference
+
+If you're new to UX evaluation as a discipline (not just to this API), the
+expanded definitions below cover the seven nouns the platform turns on.
+Skip this section if you've already integrated with similar tools — the
+five-noun model above is enough.
+
+<AccordionGroup>
+  <Accordion title="Evaluation" icon="star">
+    An evaluation is the study container. It holds everything needed to run a UX study: the URLs or design files being tested, the autousers and human raters assigned to it, the dimensions being rated, and all the resulting ratings and scores.
+
+    Autousers supports two evaluation types:
+
+    - **SSE (single experience)** — evaluates one URL or design file. Each rater assesses the experience on its own merits across the selected dimensions. Use SSE for baseline quality checks, regression testing, or first-impression studies.
+    - **SxS (side-by-side)** — compares two URLs or design files head-to-head. Each rater sees both sides and rates them against each other. Use SxS when you want to know which of two designs performs better.
+
+    Evaluations belong to a team and can be shared with collaborators or external stakeholders via a shareable link.
+
+  </Accordion>
+
+  <Accordion title="Autousers" icon="robot">
+    An autouser is an AI persona that acts as a rater in an evaluation. When you run an autouser against an evaluation, it launches a browser session, navigates your live URL using Computer Use, and then produces a structured rating for each selected dimension — including a numeric score and written rationale.
+
+    Autousers come in two kinds:
+
+    - **Built-in autousers** are maintained by Autousers and available to every team. They cover a range of representative user archetypes — different goals, device preferences, accessibility needs, and interaction styles.
+    - **Custom autousers** are team-scoped personas you define yourself. You write the role, background, and evaluation rubric, and the autouser applies that lens consistently across every run.
+
+    Because autousers browse live URLs, they evaluate your product the way a real user would — not a static screenshot or a mock. Their ratings reflect actual navigation behaviour.
+
+  </Accordion>
+
+  <Accordion title="Templates" icon="layout-template">
+    A template is a reusable evaluation configuration. It stores a set of dimensions, instructions, and other settings so you don't have to reconfigure the same study from scratch each time.
+
+    Templates are scoped to your team. When you create an evaluation using a template, the template's dimensions and settings are copied into the evaluation — changes to the template afterwards don't affect existing evaluations.
+
+    Custom dimensions you define in the evaluation wizard are automatically saved as team templates so you can reuse them in future evaluations.
+
+  </Accordion>
+
+  <Accordion title="Dimensions" icon="sliders">
+    A dimension is an axis on which a design is rated. Every rating is structured as a score per dimension, which means you get granular feedback rather than a single overall number.
+
+    Autousers includes four built-in dimensions:
+
+    - **Overall** — a holistic quality score for the experience.
+    - **Usability** — how easy the design is to navigate and use.
+    - **Visual** — the quality of the visual design, layout, and aesthetics.
+    - **Accessibility** — how well the design accommodates users with different needs.
+
+    You can also define custom dimensions for your specific evaluation goals — for example, "Onboarding clarity", "Trust signals", or "Checkout friction". Custom dimensions are saved to your team's template library automatically.
+
+  </Accordion>
+
+  <Accordion title="Ratings" icon="chart-bar">
+    A rating is the structured output produced by a rater — either an autouser or a human — for one design in an evaluation. Each rating contains a score per selected dimension and written commentary explaining the score.
+
+    Ratings from multiple raters on the same evaluation are aggregated into:
+
+    - **Aggregate scores** — the average per dimension across all raters.
+    - **Per-rater breakdowns** — individual scores and rationale so you can see where raters agree or diverge.
+    - **AI insights** — a synthesised summary of key findings and recommendations generated from the full set of ratings.
+
+    Human raters can be invited to an evaluation via a shareable link. They complete ratings in the Autousers rater interface without needing an account, depending on your sharing settings.
+
+  </Accordion>
+
+  <Accordion title="Calibration" icon="target">
+    Calibration is the process of measuring how closely an autouser agrees with human raters on the same designs, and then improving the autouser's rubric when agreement is low.
+
+    The agreement score is expressed as **Cohen's Kappa** — a statistical measure that accounts for chance agreement. A Kappa of 1.0 means perfect agreement; 0.0 means no better than chance.
+
+    The calibration workflow:
+
+    1. Run the same evaluation with both autousers and human raters.
+    2. Start calibration — Autousers computes pairwise Kappa scores between each autouser and each human rater.
+    3. If agreement is low, use the **Optimise** tool to send disagreements to the AI for rubric suggestions.
+    4. Adjust the autouser's rubric based on the suggestions and re-run calibration.
+    5. When agreement is stable and acceptable, **freeze** the rubric version. The frozen version becomes the active rubric for future runs.
+
+    Calibration is available on Team, Pro, BYOK, and Enterprise plans. See the [calibration page](/concepts/calibration) for the full workflow with code samples.
+
+  </Accordion>
+
+  <Accordion title="Team" icon="users">
+    A team is the organisational unit in Autousers. Evaluations, autousers, templates, and custom dimensions all belong to a team. When you sign up, Autousers creates a personal team for you automatically.
+
+    Team members have one of three roles:
+
+    - **Owner** — full access, including billing and team settings.
+    - **Editor** — can create and run evaluations, manage autousers and templates.
+    - **Viewer** — read-only access to evaluations and results.
+
+    You can belong to multiple teams — for example, one for your organisation and one for a client project. API keys are issued per user but operate within the scope of the teams you belong to.
+
+  </Accordion>
+</AccordionGroup>
+
+## See also
+
+- [Authentication](/authentication) — who can read which evaluations.
+- [Webhooks](/webhooks/events) — what events these objects emit.
+- [API reference](/api-reference) — every route, every field.

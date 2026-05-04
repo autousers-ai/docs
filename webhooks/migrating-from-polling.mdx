@@ -1,0 +1,133 @@
+---
+title: "Migrating from polling"
+description: "From `setInterval` to `evaluation.completed`. A practical recipe."
+---
+
+If you're already integrating with the Autousers API by polling, you
+already have most of what you need. Migrating to webhooks is mostly
+deletion.
+
+## Why migrate
+
+| Concern                    | Polling                        | Webhooks               |
+| -------------------------- | ------------------------------ | ---------------------- |
+| Latency to "eval done"     | half your poll interval (~30s) | <2 seconds             |
+| RPM consumption            | linear in eval count           | zero                   |
+| Cost                       | Pro tier RPM headroom          | free                   |
+| Reliability when you crash | nothing fires                  | retries 8× over 3 days |
+
+The only case where polling wins is **in-page live progress** — and even
+there, prefer the SSE stream at
+`/v1/evaluations/{id}/autouser-stream`.
+
+## The before — polling
+
+```ts
+async function waitForEval(evalId: string) {
+  while (true) {
+    const res = await fetch(
+      `https://app.autousers.ai/api/v1/evaluations/${evalId}/autouser-status`,
+      { headers: { Authorization: `Bearer ${KEY}` } },
+    );
+    const status = await res.json();
+    if (status.allComplete) return status;
+    await new Promise((r) => setTimeout(r, 60_000));
+  }
+}
+
+// In your batch job:
+const eval1 = await createEvaluation(...);
+const result = await waitForEval(eval1.id);   // BAD: blocks for minutes
+await postToSlack(result);
+```
+
+This blocks the worker for the run duration, makes the worker
+non-resumable on crash, and burns RPM proportional to eval count.
+
+## The after — webhooks
+
+```ts
+// 1. Once, at deploy time, register a receiver.
+await fetch("https://app.autousers.ai/api/v1/webhooks", {
+  method: "POST",
+  headers: {
+    Authorization: `Bearer ${KEY}`,
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify({
+    url: "https://your.app/webhooks/autousers",
+    enabled_events: ["evaluation.completed"],
+  }),
+});
+// Save the returned `secret` (`whsec_*`) into your secret manager.
+
+// 2. The batch job creates and returns immediately.
+const eval1 = await createEvaluation(...);
+return { evalId: eval1.id, status: "queued" };
+
+// 3. The receiver handles `evaluation.completed` when it arrives.
+app.post("/webhooks/autousers", express.raw({ type: "application/json" }), async (req, res) => {
+  if (!verifySig(req.body, req.header("autousers-signature"), SECRET)) {
+    return res.status(400).end();
+  }
+  const event = JSON.parse(req.body.toString("utf8"));
+  if (event.type === "evaluation.completed") {
+    await postToSlack(event.data.object);
+  }
+  res.status(200).end();
+});
+```
+
+Three benefits, in order of how much they matter:
+
+1. The batch job is now stateless and resumable.
+2. RPM consumption drops to **zero** for "is the eval done" checks.
+3. End-to-end latency drops from ~30s average to <2s.
+
+## State you need to keep
+
+The receiver must remember **two things** to survive crashes and
+duplicate deliveries:
+
+```ts
+// idempotency
+db.events.insertIfAbsent({ id: event.id }); // dedup on Autousers-Event-Id
+
+// outbox / job correlation
+db.evalsToProcess.upsert({ id: event.data.object.id, status: "completed" });
+```
+
+## Migration plan
+
+1. **Deploy the receiver** alongside your existing polling. Verify
+   signatures, log every event id, but do not yet act on them.
+2. **Run both for a billing cycle.** Compare your polling log against
+   the webhook log; confirm 1:1 match.
+3. **Switch acts to the webhook path.** Disable the polling worker.
+4. **Delete the polling code** in the next clean-up commit.
+
+## Bootstrapping from a known time
+
+If you missed events while building the receiver, replay from the
+event log:
+
+```bash
+curl "https://app.autousers.ai/api/v1/events?starting_after=event_lastSeenIdYouHave&limit=100" \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY"
+```
+
+Pages back through every event your team produced. POST each one
+through your normal handler with the same dedup logic you'd use for
+live deliveries.
+
+## When to keep polling
+
+A few legitimate cases:
+
+- **In-page live progress**: use the SSE stream, not webhooks.
+- **One-off scripts**: a CI job that creates an eval and waits for it
+  may not be worth the receiver setup cost.
+- **Air-gapped environments** where outbound webhook delivery to a
+  receiver isn't reachable.
+
+For everything else, webhooks win.

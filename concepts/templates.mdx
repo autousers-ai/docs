@@ -1,0 +1,92 @@
+---
+title: "Templates"
+description: "Reusable question sets composed of dimensions. The canonical noun."
+---
+
+A **template** is a reusable rating question set. Each template is
+composed of one or more **dimensions** like Usability, Visual Design,
+Accessibility, Trust, Clarity. Every Rating attaches a value to each
+dimension on the active template.
+
+<Note>
+  **Templates is the canonical noun.** The legacy alias `/v1/dimensions/*`
+  continues to work but carries `Deprecation: true` and `Sunset: Sun, 04 Apr
+  2027 00:00:00 GMT`. New code should use `/v1/templates/*` exclusively.
+</Note>
+
+## Built-in vs custom
+
+| Kind     | Owner  | Visible to                 | Editable by |
+| -------- | ------ | -------------------------- | ----------- |
+| Built-in | system | All teams                  | Read-only   |
+| Custom   | team   | Members of the owning team | Editor+     |
+
+Built-ins cover the common rubrics — UMUX-Lite, NPS-style trust scales,
+visual-design heuristics, accessibility shorthand. Forking a built-in
+into a custom template is a one-call duplicate.
+
+## Listing
+
+```bash
+curl "https://app.autousers.ai/api/v1/templates?limit=50" \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY"
+```
+
+## Creating a custom template
+
+```bash
+curl -X POST https://app.autousers.ai/api/v1/templates \
+  -H "Authorization: Bearer $AUTOUSERS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $(uuidgen)" \
+  -d '{
+    "name": "Mobile commerce — short rubric",
+    "description": "Three dimensions, 1-5 scale.",
+    "dimensions": [
+      { "id": "trust", "label": "Trust", "scale": "1-5" },
+      { "id": "clarity", "label": "Clarity", "scale": "1-5" },
+      { "id": "speed", "label": "Perceived speed", "scale": "1-5" }
+    ]
+  }'
+```
+
+Templates are versioned (`DimensionVersion` rows) — editing a template
+in active use does not retroactively change the dimensions of past
+ratings.
+
+## The `selectedDimensionIds` field
+
+When creating an evaluation, you pass `selectedDimensionIds: string[]`
+on the create body. Each id is either:
+
+- A built-in dimension key (`overall`, `trust`, `clarity`, `accessibility`, …).
+- A custom dimension id from your team's templates.
+- A new id you supply on `customDimensions[]` — autosaved into your
+  team's templates atomically with the evaluation create.
+
+The autosave behaviour means you can compose a one-off rubric inline on
+a dryRun, see the cost, then commit — and the new dimensions land in
+`/v1/templates` for future reuse without an extra round-trip.
+
+## Why "templates" and not "dimensions"
+
+The original schema called these "dimensions" — single-axis scales like
+Usability or Accessibility. But the user's mental model is the **set**,
+not the axis: "the accessibility template", not "the accessibility
+dimension". The route alias rename in 2026-04 reflects that. Internally
+the rows still live in the `dimensions` table; externally the noun is
+template.
+
+## Sunsetting an alias
+
+Until 04 Apr 2027:
+
+```http
+GET /v1/dimensions
+HTTP/1.1 200 OK
+Deprecation: true
+Sunset: Sun, 04 Apr 2027 00:00:00 GMT
+Link: <https://docs.autousers.ai/api-reference/templates>; rel="successor-version"
+```
+
+After 04 Apr 2027 the route 410s. See [Versioning](/versioning).
